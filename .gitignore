@@ -28,3 +28,4 @@ venv/
 # Temporary files
 /tmp/
 *.tmp
+schedule_config.json

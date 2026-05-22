@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Marriott Automation</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+  </head>
+  <body>
+    <main class="shell">
+      <nav class="topbar">
+        <a class="brand" href="/">
+          <span class="brand-mark">M</span>
+          <span>
+            <strong>Marriott Automation</strong>
+            <small>VMS operations console</small>
+          </span>
+        </a>
+        <div class="nav-links">
+          <a class="nav-link active" href="/">Dashboard</a>
+          <a class="nav-link" href="/schedule">Schedule</a>
+        </div>
+      </nav>
+
+      <section class="hero hero-panel">
+        <div>
+          <p class="eyebrow">Instawork Operations</p>
+          <h1>Daily Marriott VMS Control Center</h1>
+          <p class="subtitle">Refresh Mode and Simplify data, build assignment outputs, and save the right workbook copies to Drive without touching the terminal.</p>
+          <div class="hero-meta">
+            <span>Fresh Mode runs</span>
+            <span>N-1, N, N+1 window</span>
+            <span>Drive saves on by default</span>
+          </div>
+        </div>
+        <div class="status-stack">
+          <div class="status-card primary-status">
+            <span class="status-dot" id="status-dot"></span>
+            <div>
+              <p class="status-label">Current status</p>
+              <p class="status-value" id="status-value">Ready</p>
+            </div>
+          </div>
+          <div class="mini-card">
+            <p class="status-label">Next scheduled run</p>
+            <strong id="next-run-value">Loading...</strong>
+          </div>
+        </div>
+      </section>
+
+      <section class="dashboard-grid">
+        <div class="main-column">
+          <section class="workflow-grid">
+            <article class="card workflow-card pro-card">
+              <div class="workflow-header">
+                <div class="card-icon">D</div>
+                <span class="chip">Step 1</span>
+              </div>
+              <h2>Data Workflow</h2>
+              <p>Downloads fresh Mode and Simplify reports, updates source tabs, and saves a raw-data copy to Drive.</p>
+              <ul class="feature-list">
+                <li>Mode CSV: forced fresh run</li>
+                <li>Simplify: assignments, candidates, jobs</li>
+                <li>Drive folder: raw data archive</li>
+              </ul>
+              <button class="primary-button" data-workflow="data">Run Data Workflow</button>
+            </article>
+
+            <article class="card workflow-card pro-card">
+              <div class="workflow-header">
+                <div class="card-icon accent">A</div>
+                <span class="chip accent-chip">Step 2</span>
+              </div>
+              <h2>Assignments</h2>
+              <p>Builds assignment formulas and output tabs after the source data is current.</p>
+              <ul class="feature-list">
+                <li>Upload, Job Request, CAN Upload</li>
+                <li>Output, Sheet8, Summary templates</li>
+                <li>Drive folder: daily assignments</li>
+              </ul>
+              <button class="primary-button accent-button" data-workflow="assignments">Run Assignments</button>
+            </article>
+          </section>
+
+          <section class="card log-card">
+            <div class="section-header">
+              <div>
+                <p class="eyebrow">Live Output</p>
+                <h2>Run Log</h2>
+                <p class="section-copy">Watch progress, Mode retry attempts, Simplify exports, sheet updates, and Drive saves in one place.</p>
+              </div>
+              <div class="button-row tight">
+                <button class="secondary-button" id="refresh-status">Refresh</button>
+                <button class="secondary-button danger" id="stop-button" disabled>Stop Run</button>
+              </div>
+            </div>
+            <pre id="logs">Ready. Choose a workflow to begin.</pre>
+          </section>
+        </div>
+
+        <aside class="side-column">
+          <section class="card settings-card">
+            <div class="section-header">
+              <div>
+                <p class="eyebrow">Run Setup</p>
+                <h2>Controls</h2>
+              </div>
+            </div>
+
+            <label>
+              Target Google Sheet ID
+              <input id="target_spreadsheet_id" value="{{ defaults.target_spreadsheet_id }}">
+              <span class="field-help">Workbook that receives the live tab updates before copies are saved.</span>
+            </label>
+
+            <div class="two-col">
+              <label>
+                Start date
+                <input id="start_date" value="{{ defaults.start_date }}" placeholder="YYYY-MM-DD">
+              </label>
+              <label>
+                End date
+                <input id="end_date" value="{{ defaults.end_date }}" placeholder="YYYY-MM-DD">
+              </label>
+            </div>
+
+            <div class="option-group">
+              <p class="option-title">Run options</p>
+              <label class="toggle">
+                <input id="skip_snapshot" type="checkbox" {% if defaults.skip_snapshot %}checked{% endif %}>
+                <span><strong>Skip Google Drive save</strong><small>Use only for tests where no archive copy is needed.</small></span>
+              </label>
+              <label class="toggle">
+                <input id="dry_run" type="checkbox">
+                <span><strong>Dry run only</strong><small>Prepare data and counts without updating Google Sheets.</small></span>
+              </label>
+              <label class="toggle">
+                <input id="keep_all_candidates" type="checkbox">
+                <span><strong>Keep all candidates</strong><small>Do not filter Candidate Details to active candidates only.</small></span>
+              </label>
+              <label class="toggle">
+                <input id="keep_all_jobs" type="checkbox">
+                <span><strong>Keep all jobs</strong><small>Do not filter Job Status to open sourcing jobs.</small></span>
+              </label>
+            </div>
+
+            <div class="button-row">
+              <button class="secondary-button" id="open-sheet">Open Sheet</button>
+              <a class="secondary-link" href="/schedule">Edit Schedule</a>
+            </div>
+          </section>
+
+          <section class="card settings-card">
+            <p class="eyebrow">System Readiness</p>
+            <h2>Checks</h2>
+            <div class="requirements compact-requirements">
+              <ul id="requirements">
+                {% for key, ok in requirements.items() %}
+                  <li class="{{ 'ok' if ok else 'warn' }}">{{ key.replace('_', ' ').title() }}</li>
+                {% endfor %}
+              </ul>
+            </div>
+            <div class="note success-note">
+              <strong>Default behavior:</strong> every run uses fresh Mode and Simplify downloads. Data Workflow saves to raw-data Drive; Assignments saves to daily-assignment Drive.
+            </div>
+          </section>
+        </aside>
+      </section>
+    </main>
+
+    <div class="toast" id="toast" hidden></div>
+    <script src="{{ url_for('static', filename='app.js') }}"></script>
+  </body>
+</html>

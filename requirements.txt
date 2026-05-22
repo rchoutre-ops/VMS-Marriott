@@ -1,0 +1,8 @@
+Flask
+beautifulsoup4
+google-api-python-client
+google-auth
+numpy
+openpyxl
+pandas
+requests

@@ -231,6 +231,31 @@ SIMPLIFY_REPORTS = (
 )
 
 
+def load_local_env() -> None:
+    """Load local .env values for CLI runs without overriding exported env vars."""
+    candidates = []
+    if os.environ.get("ENV_FILE"):
+        candidates.append(Path(os.environ["ENV_FILE"]).expanduser())
+    candidates.extend([Path(__file__).resolve().parent / ".env", Path(__file__).resolve().parent.parent / ".env"])
+
+    env_path = next((path for path in candidates if path.exists()), None)
+    if env_path is None:
+        return
+
+    for raw_line in env_path.read_text().splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key:
+            os.environ.setdefault(key, value)
+
+
+load_local_env()
+
+
 def required_env(name: str) -> str:
     value = os.environ.get(name)
     if not value:
@@ -316,6 +341,30 @@ def _mode_auth() -> HTTPBasicAuth:
     return HTTPBasicAuth(required_env("MODE_API_KEY_ID"), required_env("MODE_API_KEY_SECRET"))
 
 
+def _mode_request(method: str, url: str, *, attempts: int = 4, **kwargs: Any) -> requests.Response:
+    """Call Mode with small retries for transient network/DNS failures."""
+    import time
+
+    last_error: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            response = requests.request(method, url, **kwargs)
+            response.raise_for_status()
+            return response
+        except requests.RequestException as exc:
+            last_error = exc
+            if attempt == attempts:
+                raise
+            wait_seconds = min(5 * attempt, 20)
+            print(
+                f"Mode API {method.upper()} failed on attempt {attempt}/{attempts}: {exc}. "
+                f"Retrying in {wait_seconds}s..."
+            )
+            time.sleep(wait_seconds)
+
+    raise RuntimeError(f"Mode API request failed unexpectedly: {last_error}")
+
+
 def _find_marriott_query_run(
     args: argparse.Namespace,
     auth: HTTPBasicAuth,
@@ -338,13 +387,13 @@ def _find_marriott_query_run(
     end = args.end_date
 
     for page in range(1, pages + 1):
-        resp = requests.get(
+        resp = _mode_request(
+            "get",
             f"{host}/api/{ws}/reports/{report}/runs",
             params={"page": page},
             auth=auth,
             timeout=30,
         )
-        resp.raise_for_status()
         runs = resp.json().get("_embedded", {}).get("report_runs", [])
         if not runs:
             return None
@@ -358,12 +407,12 @@ def _find_marriott_query_run(
             if params.get("start_date") != start or params.get("end_date") != end:
                 continue
             run_token = run["token"]
-            qr = requests.get(
+            qr = _mode_request(
+                "get",
                 f"{host}/api/{ws}/reports/{report}/runs/{run_token}/query_runs",
                 auth=auth,
                 timeout=30,
             )
-            qr.raise_for_status()
             for q in qr.json().get("_embedded", {}).get("query_runs", []):
                 if q.get("query_token") == args.mode_query_token and q.get("state") == "succeeded":
                     return run_token, q["token"], run.get("completed_at") or ""
@@ -400,8 +449,11 @@ def _trigger_marriott_run(args: argparse.Namespace, auth: HTTPBasicAuth, max_wai
     deadline = time.time() + max_wait_seconds
     while time.time() < deadline:
         time.sleep(15)
-        sr = requests.get(
-            f"{host}/api/{ws}/reports/{report}/runs/{run_token}", auth=auth, timeout=30
+        sr = _mode_request(
+            "get",
+            f"{host}/api/{ws}/reports/{report}/runs/{run_token}",
+            auth=auth,
+            timeout=30,
         ).json()
         state = sr.get("state")
         print(f"  poll {run_token} state={state}")
@@ -409,6 +461,32 @@ def _trigger_marriott_run(args: argparse.Namespace, auth: HTTPBasicAuth, max_wai
             return run_token
     print(f"Mode run {run_token} did not finish within {max_wait_seconds}s")
     return run_token
+
+
+def _find_marriott_query_run_for_run(
+    args: argparse.Namespace,
+    auth: HTTPBasicAuth,
+    run_token: str,
+) -> tuple[str, str, str] | None:
+    """Return the Marriott query_run for one specific Mode report run."""
+    run_resp = _mode_request(
+        "get",
+        f"{MODE_HOST}/api/{MODE_WORKSPACE}/reports/{args.mode_report_token}/runs/{run_token}",
+        auth=auth,
+        timeout=30,
+    )
+    completed_at = run_resp.json().get("completed_at") or ""
+
+    qr = _mode_request(
+        "get",
+        f"{MODE_HOST}/api/{MODE_WORKSPACE}/reports/{args.mode_report_token}/runs/{run_token}/query_runs",
+        auth=auth,
+        timeout=30,
+    )
+    for query_run in qr.json().get("_embedded", {}).get("query_runs", []):
+        if query_run.get("query_token") == args.mode_query_token and query_run.get("state") == "succeeded":
+            return run_token, query_run["token"], completed_at
+    return None
 
 
 def download_mode_export(args: argparse.Namespace) -> Path:
@@ -427,17 +505,41 @@ def download_mode_export(args: argparse.Namespace) -> Path:
     mode_dir.mkdir(parents=True, exist_ok=True)
     auth = _mode_auth()
 
-    found = _find_marriott_query_run(args, auth)
+    force_fresh = getattr(args, "force_fresh_mode_download", False)
+    found = None
     attempts = 0
-    while not found and attempts < args.mode_max_retries:
-        attempts += 1
+    if force_fresh:
         print(
-            f"No succeeded VMS - Marriott query_run for {args.start_date} to {args.end_date}; "
-            f"triggering a fresh Mode run (attempt {attempts}/{args.mode_max_retries})"
+            f"Forcing a fresh Mode run for {args.start_date} to {args.end_date}; "
+            "cached CSV files and prior matching report runs will not be reused."
         )
-        _trigger_marriott_run(args, auth)
+        while not found and attempts < args.mode_max_retries:
+            attempts += 1
+            run_token = _trigger_marriott_run(args, auth)
+            if run_token:
+                found = _find_marriott_query_run_for_run(args, auth, run_token)
+            if not found and attempts < args.mode_max_retries:
+                print(
+                    "Fresh Mode run did not produce a succeeded VMS - Marriott query_run; "
+                    f"retrying ({attempts + 1}/{args.mode_max_retries})"
+                )
+    else:
         found = _find_marriott_query_run(args, auth)
+        while not found and attempts < args.mode_max_retries:
+            attempts += 1
+            print(
+                f"No succeeded VMS - Marriott query_run for {args.start_date} to {args.end_date}; "
+                f"triggering a fresh Mode run (attempt {attempts}/{args.mode_max_retries})"
+            )
+            _trigger_marriott_run(args, auth)
+            found = _find_marriott_query_run(args, auth)
     if not found:
+        if force_fresh:
+            raise RuntimeError(
+                "Could not obtain a fresh Mode CSV for the requested date range. "
+                "The newly triggered Mode run did not produce a succeeded VMS - Marriott query_run. "
+                "Check the Mode run for warehouse/query failure details, then retry."
+            )
         raise RuntimeError(
             "Could not obtain a fresh Mode CSV for the requested date range. "
             "All recent report runs failed at the VMS - Marriott sub-query. "
@@ -449,13 +551,12 @@ def download_mode_export(args: argparse.Namespace) -> Path:
     out_dir.mkdir(parents=True, exist_ok=True)
     out_csv = out_dir / f"vms_marriott_{run_token}_{qr_token}.csv"
 
-    if not out_csv.exists():
+    if force_fresh or not out_csv.exists():
         url = (
             f"{MODE_HOST}/api/{MODE_WORKSPACE}/reports/{args.mode_report_token}"
             f"/runs/{run_token}/query_runs/{qr_token}/results/content.csv"
         )
-        resp = requests.get(url, auth=auth, timeout=180)
-        resp.raise_for_status()
+        resp = _mode_request("get", url, auth=auth, timeout=180)
         out_csv.write_bytes(resp.content)
         print(
             f"Downloaded fresh Mode CSV from run {run_token} query_run {qr_token} "
@@ -661,14 +762,21 @@ def download_simplify_reports(args: argparse.Namespace) -> dict[str, Path]:
     return downloaded
 
 
+def _latest_download(output_dir: Path, pattern: str) -> Path:
+    candidates = sorted(output_dir.glob(pattern), key=lambda path: path.stat().st_mtime, reverse=True)
+    if not candidates:
+        raise RuntimeError(f"No Simplify download found for pattern {pattern} under {output_dir}")
+    return candidates[0]
+
+
 def find_existing_simplify_downloads(args: argparse.Namespace) -> dict[str, Path]:
     output_dir = args.workdir / "downloads" / "simplify_raw" / "pages"
     return {
-        "Active Assignments Details - Vendor": next(
-            output_dir.glob("Active_Assignments_Details_-_Vendor__page_1_*.xlsx")
+        "Active Assignments Details - Vendor": _latest_download(
+            output_dir, "Active_Assignments_Details_-_Vendor__page_1_*.xlsx"
         ),
-        "Candidate Details": next(output_dir.glob("Candidate_Details__page_1_*.xlsx")),
-        "Job Status Report": next(output_dir.glob("Job_Status_Report__page_1_*.xlsx")),
+        "Candidate Details": _latest_download(output_dir, "Candidate_Details__page_1_*.xlsx"),
+        "Job Status Report": _latest_download(output_dir, "Job_Status_Report__page_1_*.xlsx"),
     }
 
 
@@ -1415,19 +1523,18 @@ def build_summary_template() -> pd.DataFrame:
 def default_assignment_window(today: date | None = None) -> tuple[str, str]:
     """Return (start_date, end_date) for today's Marriott operating window.
 
-    Marriott uses Sat-Fri operating weeks. Ops reconciles Past 2 / Past 1 /
-    Current (no future weeks) ending on the upcoming Friday of the current
-    week.
+    Marriott uses Sat-Fri operating weeks. Ops keeps assignment readiness for
+    N-1, N, and N+1: previous week, current week, and next week.
 
     For today (Wed in IST), the anchor Saturday is the most recent Saturday,
-    and the window is [anchor - 14 days, anchor + 6 days] = [Past 2 Sat,
-    current Fri].
+    and the window is [anchor - 7 days, anchor + 13 days] = [previous Sat,
+    next Fri].
     """
     today = today or datetime.now(ZoneInfo(SNAPSHOT_TIMEZONE)).date()
     days_since_saturday = (today.weekday() - 5) % 7
     current_saturday = today - pd.Timedelta(days=days_since_saturday).to_pytimedelta()
-    start = current_saturday - pd.Timedelta(days=14).to_pytimedelta()
-    end = current_saturday + pd.Timedelta(days=6).to_pytimedelta()
+    start = current_saturday - pd.Timedelta(days=7).to_pytimedelta()
+    end = current_saturday + pd.Timedelta(days=13).to_pytimedelta()
     return start.isoformat(), end.isoformat()
 
 
@@ -1475,12 +1582,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--start-date",
         default=default_start,
-        help="Mode/raw window start (default: Past 2 Saturday in IST).",
+        help="Mode/raw window start (default: previous Saturday in IST, N-1).",
     )
     parser.add_argument(
         "--end-date",
         default=default_end,
-        help="Mode/raw window end (default: current Friday in IST).",
+        help="Mode/raw window end (default: next Friday in IST, N+1).",
     )
     parser.add_argument(
         "--weekdays-only",
@@ -1512,8 +1619,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--mode-max-retries",
         type=int,
-        default=2,
+        default=5,
         help="If no recent VMS - Marriott query_run succeeded, how many times to trigger a fresh Mode run.",
+    )
+    parser.add_argument(
+        "--force-fresh-mode-download",
+        action="store_true",
+        help="Always trigger a new Mode report run and download its Marriott CSV, ignoring cached CSVs and prior runs.",
     )
     parser.add_argument("--simplify-export-email", default=os.environ.get("SIMPLIFY_EXPORT_EMAIL", "mcaplan@instawork.com"))
     parser.add_argument(
@@ -1572,34 +1684,9 @@ def main() -> None:
     upload_tabs(args, tabs)
 
     if not args.no_assignment_logic:
-        apply_mode_decision_formulas(args, mode_row_count=len(tabs["Mode"]))
-        decisions = compute_local_decisions(
-            tabs["Mode"],
-            tabs["Open Active"],
-            tabs["Open & Closed"],
-        )
-        upload_df = build_upload(decisions)
-        job_request_df = build_job_request(decisions, tabs["Open Active"])
-        can_upload_df = build_can_upload(decisions)
-        can_output_df = build_can_output(can_upload_df)
-        output_tabs = {
-            "upload": upload_df,
-            "job request": job_request_df,
-            "can upload": can_upload_df,
-            "can output": can_output_df,
-            "Output": build_output_template(),
-            "Sheet8": build_sheet8_template(),
-            "Summary": build_summary_template(),
-        }
-        print("Assignment-logic distribution:")
-        zeros = (decisions["Perfect AID"].astype(str) == "0") & (decisions["2nd Best AID"].astype(str) == "0")
-        print(f"  Mode rows total:                 {len(decisions)}")
-        print(f"  Perfect AID matched (do nothing): {(decisions['Perfect AID'].astype(str) != '0').sum()}")
-        print(f"  2nd Best AID matched (amend):     {((decisions['Perfect AID'].astype(str) == '0') & (decisions['2nd Best AID'].astype(str) != '0')).sum()}")
-        print(f"  Need new CAN ID (can upload):     {len(can_upload_df)}")
-        print(f"  Need new job posting (job req):   {len(job_request_df)}")
-        print(f"  Ready for Upload (needs AC):      {zeros.sum() - len(can_upload_df) - len(job_request_df)}")
-        upload_tabs(args, output_tabs)
+        from assignments import run_assignment_logic
+
+        run_assignment_logic(args, tabs, upload_tabs)
 
     if args.no_snapshot:
         return

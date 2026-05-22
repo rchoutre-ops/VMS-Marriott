@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Marriott Schedule</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+  </head>
+  <body>
+    <main class="shell">
+      <nav class="topbar">
+        <a class="brand" href="/">
+          <span class="brand-mark">M</span>
+          <span>
+            <strong>Marriott Automation</strong>
+            <small>VMS operations console</small>
+          </span>
+        </a>
+        <div class="nav-links">
+          <a class="nav-link" href="/">Dashboard</a>
+          <a class="nav-link active" href="/schedule">Schedule</a>
+        </div>
+      </nav>
+
+      <section class="hero hero-panel">
+        <div>
+          <p class="eyebrow">Automation Schedule</p>
+          <h1>Daily Run Settings</h1>
+          <p class="subtitle">Control the hands-free daily chain. Data Workflow runs first; Assignments starts only after the data refresh finishes successfully.</p>
+          <div class="hero-meta">
+            <span>Default 08:30</span>
+            <span>Asia/Kolkata</span>
+            <span>Data then assignments</span>
+          </div>
+        </div>
+        <div class="status-stack">
+          <div class="status-card primary-status">
+            <span class="status-dot"></span>
+            <div>
+              <p class="status-label">Next run</p>
+              <p class="status-value" id="next-run">{{ next_run }}</p>
+            </div>
+          </div>
+          <div class="mini-card">
+            <p class="status-label">Current state</p>
+            <strong id="schedule-state">{{ "Enabled" if config.enabled else "Disabled" }}</strong>
+          </div>
+        </div>
+      </section>
+
+      <section class="dashboard-grid schedule-dashboard-grid">
+        <section class="card settings-card">
+          <div class="section-header">
+            <div>
+              <p class="eyebrow">Daily Automation</p>
+              <h2>Schedule Controls</h2>
+              <p class="section-copy">Set when the full chain should start. The schedule uses the current N-1, N, N+1 Marriott window each day.</p>
+            </div>
+          </div>
+
+          <div class="option-group highlight-option">
+            <label class="toggle large-toggle">
+              <input id="enabled" type="checkbox" {% if config.enabled %}checked{% endif %}>
+              <span><strong>Enable daily scheduled run</strong><small>When enabled, Replit starts the chain during the configured time window.</small></span>
+            </label>
+          </div>
+
+          <div class="two-col">
+            <label>
+              Run time
+              <input id="time" type="time" value="{{ config.time }}">
+              <span class="field-help">Runs once daily inside a short grace window.</span>
+            </label>
+            <label>
+              Timezone
+              <input id="timezone" value="{{ config.timezone }}">
+              <span class="field-help">Use an IANA timezone, for example Asia/Kolkata.</span>
+            </label>
+          </div>
+
+          <label>
+            Target Google Sheet ID
+            <input id="target_spreadsheet_id" value="{{ config.target_spreadsheet_id }}">
+            <span class="field-help">Both scheduled steps update this workbook before Drive copies are saved.</span>
+          </label>
+
+          <div class="option-group">
+            <p class="option-title">Scheduled run options</p>
+            <label class="toggle">
+              <input id="skip_snapshot" type="checkbox" {% if config.skip_snapshot %}checked{% endif %}>
+              <span><strong>Skip Google Drive save</strong><small>Not recommended for production daily runs.</small></span>
+            </label>
+            <label class="toggle">
+              <input id="dry_run" type="checkbox" {% if config.dry_run %}checked{% endif %}>
+              <span><strong>Dry run only</strong><small>Useful for testing the chain without writing sheet updates.</small></span>
+            </label>
+            <label class="toggle">
+              <input id="keep_all_candidates" type="checkbox" {% if config.keep_all_candidates %}checked{% endif %}>
+              <span><strong>Keep all Candidate Details rows</strong><small>Overrides the active-candidate filter.</small></span>
+            </label>
+            <label class="toggle">
+              <input id="keep_all_jobs" type="checkbox" {% if config.keep_all_jobs %}checked{% endif %}>
+              <span><strong>Keep all Job Status rows</strong><small>Overrides sourcing/open-job filtering.</small></span>
+            </label>
+          </div>
+
+          <div class="button-row">
+            <button class="primary-button compact" id="save-schedule">Save Schedule</button>
+            <button class="secondary-button" id="run-now">Run Chain Now</button>
+          </div>
+        </section>
+
+        <aside class="side-column">
+          <section class="card settings-card">
+            <p class="eyebrow">Run Sequence</p>
+            <h2>What Happens Daily</h2>
+            <div class="timeline elevated-timeline">
+              <div>
+                <span class="step-number">1</span>
+                <strong>Data Workflow</strong>
+                <p>Fresh Mode run, fresh Simplify downloads, source tabs updated, workbook copy saved to the raw-data Drive folder.</p>
+              </div>
+              <div>
+                <span class="step-number">2</span>
+                <strong>Assignments</strong>
+                <p>Starts only if Data Workflow succeeds. Builds assignment tabs and saves a workbook copy to the daily-assignment Drive folder.</p>
+              </div>
+            </div>
+          </section>
+
+          <section class="card settings-card">
+            <p class="eyebrow">Readiness</p>
+            <h2>System Checks</h2>
+            <div class="requirements compact-requirements">
+              <ul id="requirements">
+                {% for key, ok in requirements.items() %}
+                  <li class="{{ 'ok' if ok else 'warn' }}">{{ key.replace('_', ' ').title() }}</li>
+                {% endfor %}
+              </ul>
+            </div>
+            <div class="note">
+              Replit must be deployed and running for the in-app scheduler to fire. Use <strong>Run Chain Now</strong> for a manual end-to-end test.
+            </div>
+          </section>
+        </aside>
+      </section>
+    </main>
+
+    <div class="toast" id="toast" hidden></div>
+    <script src="{{ url_for('static', filename='schedule.js') }}"></script>
+  </body>
+</html>
