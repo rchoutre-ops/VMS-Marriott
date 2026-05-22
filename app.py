@@ -295,17 +295,19 @@ def load_schedule_config() -> dict[str, Any]:
             saved = {}
         if isinstance(saved, dict):
             config.update(saved)
+    config["timezone"] = SNAPSHOT_TIMEZONE
     return config
 
 
 def save_schedule_config(config: dict[str, Any]) -> None:
     merged = default_schedule_config()
     merged.update(config)
+    merged["timezone"] = SNAPSHOT_TIMEZONE
     SCHEDULE_CONFIG_PATH.write_text(json.dumps(merged, indent=2, sort_keys=True) + "\n")
 
 
 def today_scheduled_datetime(config: dict[str, Any], now: datetime | None = None) -> datetime:
-    tz = ZoneInfo(config.get("timezone") or SNAPSHOT_TIMEZONE)
+    tz = ZoneInfo(SNAPSHOT_TIMEZONE)
     now = now.astimezone(tz) if now else datetime.now(tz)
     hour, minute = [int(part) for part in str(config.get("time", "08:30")).split(":", 1)]
     return now.replace(hour=hour, minute=minute, second=0, microsecond=0)
@@ -314,7 +316,7 @@ def today_scheduled_datetime(config: dict[str, Any], now: datetime | None = None
 def schedule_is_due(config: dict[str, Any], now: datetime | None = None) -> bool:
     if not config.get("enabled", True):
         return False
-    tz = ZoneInfo(config.get("timezone") or SNAPSHOT_TIMEZONE)
+    tz = ZoneInfo(SNAPSHOT_TIMEZONE)
     now = now.astimezone(tz) if now else datetime.now(tz)
     candidate = today_scheduled_datetime(config, now)
     within_grace = candidate <= now <= candidate + timedelta(seconds=SCHEDULE_GRACE_SECONDS)
@@ -324,7 +326,7 @@ def schedule_is_due(config: dict[str, Any], now: datetime | None = None) -> bool
 def next_scheduled_run(config: dict[str, Any], now: datetime | None = None) -> datetime | None:
     if not config.get("enabled", True):
         return None
-    tz = ZoneInfo(config.get("timezone") or SNAPSHOT_TIMEZONE)
+    tz = ZoneInfo(SNAPSHOT_TIMEZONE)
     now = now.astimezone(tz) if now else datetime.now(tz)
     candidate = today_scheduled_datetime(config, now)
     if candidate <= now or config.get("last_started_for_date") == candidate.date().isoformat():
@@ -542,10 +544,6 @@ def validate_schedule_config(config: dict[str, Any]) -> str | None:
         datetime.strptime(str(config.get("time", "")), "%H:%M")
     except ValueError:
         return "Schedule time must use HH:MM."
-    try:
-        ZoneInfo(str(config.get("timezone") or SNAPSHOT_TIMEZONE))
-    except Exception:
-        return "Timezone must be a valid IANA timezone, for example Asia/Kolkata."
     if not str(config.get("target_spreadsheet_id", "")).strip():
         return "Target Google Sheet ID is required."
     return None
@@ -686,7 +684,7 @@ def update_schedule_api() -> tuple[Any, int]:
     editable = {
         "enabled": bool(payload.get("enabled")),
         "time": str(payload.get("time", "08:30")).strip(),
-        "timezone": str(payload.get("timezone", SNAPSHOT_TIMEZONE)).strip(),
+        "timezone": SNAPSHOT_TIMEZONE,
         "target_spreadsheet_id": str(payload.get("target_spreadsheet_id", DEFAULT_TARGET_SPREADSHEET_ID)).strip(),
         "skip_snapshot": bool(payload.get("skip_snapshot")),
         "dry_run": bool(payload.get("dry_run")),

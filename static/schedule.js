@@ -15,7 +15,7 @@ function scheduleForm() {
   return {
     enabled: document.querySelector("#enabled").checked,
     time: document.querySelector("#time").value,
-    timezone: document.querySelector("#timezone").value,
+    timezone: "Asia/Kolkata",
     target_spreadsheet_id: document.querySelector("#target_spreadsheet_id").value,
     skip_snapshot: document.querySelector("#skip_snapshot").checked,
     dry_run: document.querySelector("#dry_run").checked,

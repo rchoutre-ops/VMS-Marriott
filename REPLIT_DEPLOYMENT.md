@@ -45,7 +45,7 @@ The app binds to `0.0.0.0` and uses Replit's `PORT` environment variable when pr
 
 ## Daily Schedule
 
-Open `/schedule` to change the daily schedule. The default is enabled at `08:30` in `Asia/Kolkata`.
+Open `/schedule` to change the daily schedule. The default is enabled at `08:30` IST. All scheduled/cron runs are fixed to `Asia/Kolkata`.
 
 At the scheduled time, the app runs:
 

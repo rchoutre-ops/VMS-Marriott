@@ -26,7 +26,7 @@
         <div>
           <p class="eyebrow">Automation Schedule</p>
           <h1>Daily Run Settings</h1>
-          <p class="subtitle">Control the hands-free daily chain. Data Workflow runs first; Assignments starts only after the data refresh finishes successfully.</p>
+          <p class="subtitle">Control the hands-free daily chain. All scheduled times are IST (Asia/Kolkata). Data Workflow runs first; Assignments starts only after the data refresh finishes successfully.</p>
           <div class="hero-meta">
             <span>Default 08:30</span>
             <span>Asia/Kolkata</span>
@@ -69,12 +69,12 @@
             <label>
               Run time
               <input id="time" type="time" value="{{ config.time }}">
-              <span class="field-help">Runs once daily inside a short grace window.</span>
+              <span class="field-help">Runs once daily inside a short IST grace window.</span>
             </label>
             <label>
               Timezone
-              <input id="timezone" value="{{ config.timezone }}">
-              <span class="field-help">Use an IANA timezone, for example Asia/Kolkata.</span>
+              <input id="timezone" value="Asia/Kolkata (IST)" readonly>
+              <span class="field-help">Fixed for all cron/scheduled runs.</span>
             </label>
           </div>
 
