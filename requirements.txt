@@ -6,3 +6,11 @@ numpy
 openpyxl
 pandas
 requests
+beautifulsoup4
+Flask
+google-api-python-client
+google-auth
+numpy
+openpyxl
+pandas
+requests
