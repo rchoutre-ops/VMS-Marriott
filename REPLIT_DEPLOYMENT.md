@@ -59,4 +59,10 @@ Drive saves:
 - Data Workflow copies the populated workbook to `1nPq1cEdPRlE5irYyetqYi24uTySFHv0J`.
 - Assignments copies the populated workbook to `1m-4NWsTQUQ51mJiQfMD-emhvm0qN1Fc_`.
 
+Run logs:
+
+- Every manual button run and scheduled run writes to logging workbook `1veHtzoByPQfD7CDynmxJOTiH2ZuksqkxUnmG96alwYE`.
+- `Latest Logs` is cleared at run start and then receives timestamped IST log rows for the active run.
+- `Full Log History` receives a separated, human-readable run block after the run finishes.
+
 Use `Dry run only` to validate data preparation and assignment counts without updating Google Sheets.

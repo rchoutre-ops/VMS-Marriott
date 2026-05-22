@@ -17,12 +17,17 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from flask import Flask, jsonify, render_template, request
+from google.oauth2.service_account import Credentials
+from googleapiclient.discovery import build
 
 
 APP_DIR = Path(__file__).resolve().parent
 DEFAULT_TARGET_SPREADSHEET_ID = "1gMYap7mOK17l7lOhPtBohGjJoC1FsPWfjyywXwFjLWk"
 RAW_DATA_FOLDER_ID = "1nPq1cEdPRlE5irYyetqYi24uTySFHv0J"
 ASSIGNMENT_FOLDER_ID = "1m-4NWsTQUQ51mJiQfMD-emhvm0qN1Fc_"
+LOG_SPREADSHEET_ID = "1veHtzoByPQfD7CDynmxJOTiH2ZuksqkxUnmG96alwYE"
+LATEST_LOGS_TAB = "Latest Logs"
+FULL_LOG_HISTORY_TAB = "Full Log History"
 SNAPSHOT_TIMEZONE = "Asia/Kolkata"
 MAX_LOG_LINES = 1500
 SCHEDULE_CONFIG_PATH = APP_DIR / "schedule_config.json"
@@ -72,7 +77,16 @@ RUN_STATE: dict[str, Any] = {
     "process": None,
 }
 SCHEDULE_LOCK = threading.Lock()
+LOG_SHEET_LOCK = threading.Lock()
 SCHEDULER_STARTED = False
+LOG_SESSION: dict[str, Any] = {
+    "active": False,
+    "run_id": None,
+    "workflow": None,
+    "started_at_ist": None,
+    "rows": [],
+    "sheet_error_reported": False,
+}
 
 
 def default_assignment_window() -> tuple[str, str]:
@@ -96,6 +110,163 @@ def snapshot_name(workflow: str, start_date: str, end_date: str) -> str:
 
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def ist_now() -> datetime:
+    return datetime.now(ZoneInfo(SNAPSHOT_TIMEZONE))
+
+
+def human_ist_timestamp(value: datetime | None = None) -> str:
+    value = value or ist_now()
+    return value.strftime("%A, %d %b %Y %I:%M:%S %p IST")
+
+
+def compact_ist_timestamp(value: datetime | None = None) -> str:
+    value = value or ist_now()
+    return value.strftime("%Y%m%d-%H%M%S")
+
+
+def log_sheet_service() -> Any:
+    credentials = Credentials.from_service_account_file(
+        str(credential_path()),
+        scopes=["https://www.googleapis.com/auth/spreadsheets"],
+    )
+    return build("sheets", "v4", credentials=credentials, cache_discovery=False)
+
+
+def ensure_log_tabs(service: Any) -> None:
+    spreadsheet = (
+        service.spreadsheets()
+        .get(spreadsheetId=LOG_SPREADSHEET_ID, fields="sheets(properties(title))")
+        .execute()
+    )
+    existing = {sheet["properties"]["title"] for sheet in spreadsheet.get("sheets", [])}
+    requests = [
+        {"addSheet": {"properties": {"title": title}}}
+        for title in (LATEST_LOGS_TAB, FULL_LOG_HISTORY_TAB)
+        if title not in existing
+    ]
+    if requests:
+        service.spreadsheets().batchUpdate(
+            spreadsheetId=LOG_SPREADSHEET_ID,
+            body={"requests": requests},
+        ).execute()
+
+
+def append_log_rows(tab_name: str, rows: list[list[str]]) -> None:
+    if not rows:
+        return
+    service = log_sheet_service()
+    ensure_log_tabs(service)
+    service.spreadsheets().values().append(
+        spreadsheetId=LOG_SPREADSHEET_ID,
+        range=f"'{tab_name}'!A:E",
+        valueInputOption="USER_ENTERED",
+        insertDataOption="INSERT_ROWS",
+        body={"values": rows},
+    ).execute()
+
+
+def clear_latest_log_sheet(run_id: str, workflow: str, started_at: str) -> None:
+    service = log_sheet_service()
+    ensure_log_tabs(service)
+    service.spreadsheets().values().clear(
+        spreadsheetId=LOG_SPREADSHEET_ID,
+        range=f"'{LATEST_LOGS_TAB}'!A:E",
+        body={},
+    ).execute()
+    service.spreadsheets().values().update(
+        spreadsheetId=LOG_SPREADSHEET_ID,
+        range=f"'{LATEST_LOGS_TAB}'!A1:E3",
+        valueInputOption="USER_ENTERED",
+        body={
+            "values": [
+                [f"Latest Marriott Automation Run: {workflow}", "", "", "", ""],
+                [f"Run ID: {run_id}", f"Started: {started_at}", "", "", ""],
+                ["Run ID", "Timestamp IST", "Workflow", "Event Type", "Message"],
+            ]
+        },
+    ).execute()
+
+
+def begin_sheet_logging(workflow: str, command_summary: str) -> None:
+    started_at = human_ist_timestamp()
+    run_id = f"{compact_ist_timestamp()}-{workflow.lower().replace(' ', '-')}"
+    with LOG_SHEET_LOCK:
+        LOG_SESSION.update(
+            {
+                "active": True,
+                "run_id": run_id,
+                "workflow": workflow,
+                "started_at_ist": started_at,
+                "rows": [],
+                "sheet_error_reported": False,
+            }
+        )
+    try:
+        clear_latest_log_sheet(run_id, workflow, started_at)
+        append_sheet_log("RUN", f"Run started. {command_summary}")
+    except Exception as exc:  # noqa: BLE001 - logging must never block automation.
+        with LOG_SHEET_LOCK:
+            LOG_SESSION["sheet_error_reported"] = True
+        print(f"Google log sheet initialization failed: {exc}")
+
+
+def append_sheet_log(event_type: str, message: str) -> None:
+    with LOG_SHEET_LOCK:
+        if not LOG_SESSION.get("active"):
+            return
+        run_id = str(LOG_SESSION["run_id"])
+        workflow = str(LOG_SESSION["workflow"])
+        timestamp = human_ist_timestamp()
+
+    rows = []
+    for part in str(message).splitlines() or [""]:
+        text = part.strip()
+        if not text:
+            continue
+        rows.append([run_id, timestamp, workflow, event_type, text])
+    if not rows:
+        return
+
+    with LOG_SHEET_LOCK:
+        LOG_SESSION["rows"].extend(rows)
+
+    try:
+        append_log_rows(LATEST_LOGS_TAB, rows)
+    except Exception as exc:  # noqa: BLE001 - logging must never block automation.
+        with LOG_SHEET_LOCK:
+            already_reported = bool(LOG_SESSION.get("sheet_error_reported"))
+            LOG_SESSION["sheet_error_reported"] = True
+        if not already_reported:
+            print(f"Google Latest Logs append failed: {exc}")
+
+
+def finish_sheet_logging(status: str, exit_code: int | None) -> None:
+    finished_at = human_ist_timestamp()
+    append_sheet_log("RUN", f"Run finished with status={status}, exit_code={exit_code}, finished_at={finished_at}.")
+    with LOG_SHEET_LOCK:
+        if not LOG_SESSION.get("active"):
+            return
+        run_id = str(LOG_SESSION["run_id"])
+        workflow = str(LOG_SESSION["workflow"])
+        started_at = str(LOG_SESSION["started_at_ist"])
+        rows = list(LOG_SESSION["rows"])
+        LOG_SESSION["active"] = False
+
+    history_rows = [
+        ["", "", "", "", ""],
+        [f"========== {workflow} | {run_id} ==========", "", "", "", ""],
+        [f"Started: {started_at}", f"Finished: {finished_at}", f"Status: {status}", f"Exit code: {exit_code}", ""],
+        ["Run ID", "Timestamp IST", "Workflow", "Event Type", "Message"],
+        *rows,
+        [f"========== END {run_id} ==========", "", "", "", ""],
+        ["", "", "", "", ""],
+    ]
+    try:
+        append_log_rows(FULL_LOG_HISTORY_TAB, history_rows)
+    except Exception as exc:  # noqa: BLE001 - logging must never block automation.
+        print(f"Google Full Log History append failed: {exc}")
 
 
 def default_schedule_config() -> dict[str, Any]:
@@ -249,6 +420,7 @@ def build_command(workflow: str, form: dict[str, Any], *, reuse_downloads: bool 
 def append_log(line: str) -> None:
     with RUN_LOCK:
         RUN_STATE["logs"].append(line)
+    append_sheet_log("LOG", line)
 
 
 def run_command(command: list[str], workflow_label: str) -> int:
@@ -280,25 +452,32 @@ def run_command(command: list[str], workflow_label: str) -> int:
 
 
 def run_process(command: list[str], workflow_label: str) -> None:
+    final_status = "Failed"
+    final_exit_code = 1
     try:
         exit_code = run_command(command, workflow_label)
+        final_status = "Completed" if exit_code == 0 else "Failed"
+        final_exit_code = exit_code
         with RUN_LOCK:
-            RUN_STATE["status"] = "Completed" if exit_code == 0 else "Failed"
+            RUN_STATE["status"] = final_status
             RUN_STATE["exit_code"] = exit_code
     except Exception as exc:  # noqa: BLE001 - surface any workflow launch/runtime error.
         with RUN_LOCK:
             RUN_STATE["status"] = "Failed"
             RUN_STATE["exit_code"] = 1
-            RUN_STATE["logs"].append(f"\nWorkflow launcher error: {exc}\n")
+        append_log(f"\nWorkflow launcher error: {exc}\n")
     finally:
+        final_message = (
+            f"\n{workflow_label} completed successfully.\n"
+            if final_exit_code == 0
+            else f"\n{workflow_label} failed with exit code {final_exit_code}.\n"
+        )
+        append_log(final_message)
         with RUN_LOCK:
             RUN_STATE["running"] = False
             RUN_STATE["ended_at"] = utc_now_iso()
             RUN_STATE["process"] = None
-            if RUN_STATE["exit_code"] == 0:
-                RUN_STATE["logs"].append(f"\n{workflow_label} completed successfully.\n")
-            else:
-                RUN_STATE["logs"].append(f"\n{workflow_label} failed with exit code {RUN_STATE['exit_code']}.\n")
+        finish_sheet_logging(final_status, final_exit_code)
 
 
 def run_chained_process(steps: list[tuple[str, list[str]]], schedule_config: dict[str, Any] | None = None) -> None:
@@ -321,17 +500,18 @@ def run_chained_process(steps: list[tuple[str, list[str]]], schedule_config: dic
         append_log(f"\nScheduled workflow launcher error: {exc}\n")
     finally:
         finished_at = utc_now_iso()
+        append_log(
+            "\nScheduled daily run completed successfully.\n"
+            if final_exit_code == 0
+            else f"\nScheduled daily run failed with exit code {final_exit_code}.\n"
+        )
         with RUN_LOCK:
             RUN_STATE["running"] = False
             RUN_STATE["status"] = final_status
             RUN_STATE["ended_at"] = finished_at
             RUN_STATE["exit_code"] = final_exit_code
             RUN_STATE["process"] = None
-            RUN_STATE["logs"].append(
-                "\nScheduled daily run completed successfully.\n"
-                if final_exit_code == 0
-                else f"\nScheduled daily run failed with exit code {final_exit_code}.\n"
-            )
+        finish_sheet_logging(final_status, final_exit_code)
         if schedule_config is not None:
             with SCHEDULE_LOCK:
                 latest = load_schedule_config()
@@ -400,11 +580,14 @@ def start_scheduled_run(config: dict[str, Any], trigger: str, *, consume_schedul
                 "process": None,
             }
         )
-        RUN_STATE["logs"].append(f"Starting Scheduled Daily Run ({trigger})\n")
-        RUN_STATE["logs"].append(
-            f"Window: {form['start_date']} to {form['end_date']}\n"
-            "Sequence: Data Workflow -> Assignments\n\n"
-        )
+
+    command_summary = f"Trigger={trigger}; window={form['start_date']} to {form['end_date']}; sequence=Data Workflow -> Assignments"
+    begin_sheet_logging("Scheduled Daily Run", command_summary)
+    append_log(f"Starting Scheduled Daily Run ({trigger})\n")
+    append_log(
+        f"Window: {form['start_date']} to {form['end_date']}\n"
+        "Sequence: Data Workflow -> Assignments\n\n"
+    )
 
     with SCHEDULE_LOCK:
         latest = load_schedule_config()
@@ -567,7 +750,10 @@ def run_workflow(workflow: str) -> tuple[Any, int]:
             }
         )
         RUN_STATE["logs"].append(f"Starting {label}\n")
-        RUN_STATE["logs"].append("Command:\n  " + " ".join(command) + "\n\n")
+
+    begin_sheet_logging(label, "Command: " + " ".join(command))
+    append_log(f"Starting {label}\n")
+    append_log("Command:\n  " + " ".join(command) + "\n\n")
 
     thread = threading.Thread(target=run_process, args=(command, label), daemon=True)
     thread.start()
@@ -581,7 +767,7 @@ def stop_workflow() -> tuple[Any, int]:
         if not RUN_STATE["running"] or process is None:
             return jsonify({"ok": False, "error": "No workflow is running."}), 400
         RUN_STATE["status"] = "Stopping"
-        RUN_STATE["logs"].append("\nStop requested. Terminating workflow...\n")
+    append_log("\nStop requested. Terminating workflow...\n")
 
     try:
         os.killpg(os.getpgid(process.pid), signal.SIGTERM)

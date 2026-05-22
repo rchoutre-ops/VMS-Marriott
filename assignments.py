@@ -119,7 +119,17 @@ def _decision_formulas(row_number: int) -> list[str]:
 def apply_mode_decision_formulas(args: Any, mode_row_count: int) -> None:
     """Write headers + formulas for Mode columns W..AM in Google Sheets."""
     if mode_row_count <= 0:
+        print("Assignment formula step skipped: Mode has 0 rows, so W..AM formulas were not applied.")
         return
+    print("Assignment formula step 1/1: applying Mode decision formulas to columns W..AM.")
+    print("  Formula W Perfect Match: CONCATENATE(Department_Code, worker_id, partner_rate).")
+    print("  Formula X Perfect AID: FILTER Open Active Assignment ID where Con1 matches and shift date is inside assignment start/end.")
+    print("  Formula Y 2nd Best Match: CONCATENATE(fieldglass_site_name, worker_id, partner_rate).")
+    print("  Formula Z 2nd Best AID: FILTER Open Active Assignment ID where Con 2 matches and shift date is inside assignment start/end.")
+    print("  Formula AA validation_for_Department: compare Mode Department_Code with department on 2nd Best AID.")
+    print("  Formula AB CAN ID: XLOOKUP worker_id against Open & Closed Vendor Tracking ID 1 -> Candidate ID.")
+    print("  Formula AF Existing Jobs: XLOOKUP 2nd Best AID against Open & Closed Assignment ID -> Job ID.")
+    print("  Formula AJ/AK/AL/AM: lookup selected Available Job dates, format shift date, and build upload concat.")
     credentials = Credentials.from_service_account_file(
         str(args.google_credentials),
         scopes=["https://www.googleapis.com/auth/spreadsheets"],
@@ -159,6 +169,18 @@ def compute_local_decisions(
     open_closed_df: pd.DataFrame,
 ) -> pd.DataFrame:
     """Compute AID/CAN/job decisions locally for deterministic output tabs."""
+    print("Assignment decision engine: starting local decision computation.")
+    print(f"  Input Mode rows: {len(mode_df)}")
+    print(f"  Input Open Active rows: {len(open_active_df)}")
+    print(f"  Input Open & Closed rows: {len(open_closed_df)}")
+    print("  Rule order:")
+    print("    1. Build Perfect Match = Department_Code + worker_id + partner_rate.")
+    print("    2. Perfect AID match requires Open Active Con1 equal to Perfect Match and shift date inside Assignment Start/End Date.")
+    print("    3. Build 2nd Best Match = fieldglass_site_name + worker_id + partner_rate.")
+    print("    4. 2nd Best AID match requires Open Active Con 2 equal to 2nd Best Match and shift date inside Assignment Start/End Date.")
+    print("    5. validation_for_Department compares Mode department with the matched 2nd Best AID department.")
+    print("    6. CAN ID lookup uses Open & Closed Vendor Tracking ID 1 -> Candidate ID.")
+    print("    7. Existing Jobs lookup uses 2nd Best AID -> Open & Closed Job ID.")
     df = mode_df.copy()
 
     oa = open_active_df.copy()
@@ -248,11 +270,23 @@ def compute_local_decisions(
     df["CAN ID"] = can_id
     df["Existing Jobs"] = existing_jobs
 
+    print("Assignment decision engine: local decision columns computed.")
+    print(f"  Perfect AID rows: {(df['Perfect AID'].astype(str) != '0').sum()}")
+    print(
+        "  2nd Best AID rows: "
+        f"{((df['Perfect AID'].astype(str) == '0') & (df['2nd Best AID'].astype(str) != '0')).sum()}"
+    )
+    print(f"  Missing AID rows: {((df['Perfect AID'].astype(str) == '0') & (df['2nd Best AID'].astype(str) == '0')).sum()}")
+    print(f"  CAN ID present rows: {((df['CAN ID'].astype(str) != '0') & (df['CAN ID'].astype(str) != '')).sum()}")
+    print(f"  CAN ID missing rows: {(df['CAN ID'].astype(str).isin(['0', '', 'nan'])).sum()}")
     return df
 
 
 def build_upload(decisions_df: pd.DataFrame) -> pd.DataFrame:
     """Rows ready for Simplify direct assignment once Available Jobs is chosen."""
+    print("Assignment output build step: upload tab template created.")
+    print("  Rule: rows require Perfect AID = 0, 2nd Best AID = 0, CAN ID present, and manually selected Available Jobs.")
+    print("  Current implementation keeps upload empty until Available Jobs is chosen in Mode.")
     return pd.DataFrame(
         columns=[
             "Candidate ID",
@@ -275,6 +309,8 @@ def build_job_request(
     open_active_df: pd.DataFrame,
 ) -> pd.DataFrame:
     """Mode rows that need a brand new Simplify job posting."""
+    print("Assignment output build step: evaluating Job Request rows.")
+    print("  Rule: Perfect AID = 0 AND 2nd Best AID = 0 AND CAN ID present.")
     mask = (
         (decisions_df["Perfect AID"].astype(str) == "0")
         & (decisions_df["2nd Best AID"].astype(str) == "0")
@@ -282,6 +318,7 @@ def build_job_request(
         & (decisions_df["CAN ID"].astype(str) != "")
     )
     selected = decisions_df.loc[mask].copy()
+    print(f"  Job Request candidate rows: {len(selected)}")
     columns = [
         "Property ID",
         "Property Name",
@@ -333,12 +370,15 @@ def build_job_request(
 
 def build_can_upload(decisions_df: pd.DataFrame) -> pd.DataFrame:
     """Mode rows representing pros without a Marriott Candidate ID."""
+    print("Assignment output build step: evaluating CAN Upload rows.")
+    print("  Rule: Perfect AID = 0 AND 2nd Best AID = 0 AND CAN ID missing/0/nan.")
     mask = (
         (decisions_df["Perfect AID"].astype(str) == "0")
         & (decisions_df["2nd Best AID"].astype(str) == "0")
         & (decisions_df["CAN ID"].astype(str).isin(["0", "", "nan"]))
     )
     selected = decisions_df.loc[mask].copy()
+    print(f"  CAN Upload candidate shift rows before worker de-dupe: {len(selected)}")
     columns = [
         "First Name",
         "Middle Name",
@@ -351,6 +391,7 @@ def build_can_upload(decisions_df: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame(columns=columns)
 
     selected = selected.drop_duplicates(subset=["worker_id"], keep="first")
+    print(f"  CAN Upload rows after worker_id de-dupe: {len(selected)}")
     dob_mmdd = (
         selected["dob_mmdd"]
         .astype(str)
@@ -372,6 +413,8 @@ def build_can_upload(decisions_df: pd.DataFrame) -> pd.DataFrame:
 
 def build_can_output(can_upload_df: pd.DataFrame) -> pd.DataFrame:
     """CAN Upload columns plus returned Candidate ID and Remarks."""
+    print("Assignment output build step: creating CAN Output template.")
+    print("  Rule: preserve CAN Upload row order and add Candidate ID + Remarks columns for Simplify import output.")
     cols = [
         "First Name",
         "Middle Name",
@@ -392,6 +435,7 @@ def build_can_output(can_upload_df: pd.DataFrame) -> pd.DataFrame:
 
 def build_output_template() -> pd.DataFrame:
     """Empty `Output` tab template for post-import tracking."""
+    print("Assignment output build step: creating Output template for post-import tracking.")
     return pd.DataFrame(
         columns=[
             "Candidate ID",
@@ -417,22 +461,28 @@ def build_output_template() -> pd.DataFrame:
 
 def build_sheet8_template() -> pd.DataFrame:
     """Empty `Sheet8` source tab for candidate creation."""
+    print("Assignment output build step: creating Sheet8 template for sensitive candidate creation source data.")
     return pd.DataFrame(columns=["id", "name", "email", "ssn", "bank_account_type", "date_of_birth"])
 
 
 def build_summary_template() -> pd.DataFrame:
     """Empty `Summary` tab for operator scratch / QA notes."""
+    print("Assignment output build step: creating Summary scratch tab.")
     return pd.DataFrame(columns=["Summary"])
 
 
 def build_assignment_tabs(tabs: dict[str, pd.DataFrame]) -> tuple[dict[str, pd.DataFrame], pd.DataFrame]:
     """Build assignment output tabs from prepared raw workflow tabs."""
+    print("Assignment tab build sequence started.")
+    print("  Step 1: compute local decisions from Mode, Open Active, and Open & Closed.")
     decisions = compute_local_decisions(
         tabs["Mode"],
         tabs["Open Active"],
         tabs["Open & Closed"],
     )
+    print("  Step 2: build CAN Upload from missing-CAN decision rows.")
     can_upload_df = build_can_upload(decisions)
+    print("  Step 3: build output tabs in this order: upload, job request, can upload, can output, Output, Sheet8, Summary.")
     output_tabs = {
         "upload": build_upload(decisions),
         "job request": build_job_request(decisions, tabs["Open Active"]),
@@ -442,6 +492,9 @@ def build_assignment_tabs(tabs: dict[str, pd.DataFrame]) -> tuple[dict[str, pd.D
         "Sheet8": build_sheet8_template(),
         "Summary": build_summary_template(),
     }
+    print("Assignment tab build sequence completed.")
+    for title, df in output_tabs.items():
+        print(f"  Output tab '{title}': {len(df)} rows x {len(df.columns)} columns")
     return output_tabs, decisions
 
 
@@ -470,11 +523,16 @@ def run_assignment_logic(
     apply_formulas: bool = True,
 ) -> dict[str, pd.DataFrame]:
     """Run assignment formulas, build output tabs, upload them, and return them."""
+    print("Assignment workflow started.")
     if apply_formulas:
         apply_mode_decision_formulas(args, mode_row_count=len(tabs["Mode"]))
+    else:
+        print("Assignment formula step skipped by caller: apply_formulas=False.")
     output_tabs, decisions = build_assignment_tabs(tabs)
     print_assignment_distribution(decisions, output_tabs)
+    print("Assignment workflow upload step: writing assignment output tabs to target Google Sheet.")
     upload_tabs(args, output_tabs)
+    print("Assignment workflow completed.")
     return output_tabs
 
 
