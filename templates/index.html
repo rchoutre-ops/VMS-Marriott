@@ -38,7 +38,7 @@
             <span class="status-dot" id="status-dot"></span>
             <div>
               <p class="status-label">Current status</p>
-              <p class="status-value" id="status-value">Ready</p>
+              <p class="status-value" id="status-value" aria-live="polite">Ready</p>
             </div>
           </div>
           <div class="mini-card">
@@ -46,6 +46,24 @@
             <strong id="next-run-value">Loading...</strong>
           </div>
         </div>
+      </section>
+
+      <section class="insight-grid">
+        <article class="insight-card">
+          <span class="insight-label">Current window</span>
+          <strong>{{ defaults.start_date }} to {{ defaults.end_date }}</strong>
+          <p>N-1, N, N+1 Marriott operating range.</p>
+        </article>
+        <article class="insight-card">
+          <span class="insight-label">Run logging</span>
+          <strong>Latest + history</strong>
+          <p>Every manual and scheduled run writes IST logs to the logging workbook.</p>
+        </article>
+        <article class="insight-card">
+          <span class="insight-label">Automation clock</span>
+          <strong>Asia/Kolkata</strong>
+          <p>Scheduled jobs are fixed to IST for predictable daily execution.</p>
+        </article>
       </section>
 
       <section class="dashboard-grid">
@@ -62,6 +80,7 @@
                 <li>Mode CSV: forced fresh run</li>
                 <li>Simplify: assignments, candidates, jobs</li>
                 <li>Drive folder: raw data archive</li>
+                <li>Latest Logs cleared and rebuilt for this run</li>
               </ul>
               <button class="primary-button" data-workflow="data">Run Data Workflow</button>
             </article>
@@ -77,6 +96,7 @@
                 <li>Upload, Job Request, CAN Upload</li>
                 <li>Output, Sheet8, Summary templates</li>
                 <li>Drive folder: daily assignments</li>
+                <li>Rule and formula order logged in detail</li>
               </ul>
               <button class="primary-button accent-button" data-workflow="assignments">Run Assignments</button>
             </article>
@@ -90,11 +110,19 @@
                 <p class="section-copy">Watch progress, Mode retry attempts, Simplify exports, sheet updates, and Drive saves in one place.</p>
               </div>
               <div class="button-row tight">
+                <button class="secondary-button" id="copy-log">Copy Log</button>
+                <button class="secondary-button" id="open-log-sheet">Open Logs Sheet</button>
                 <button class="secondary-button" id="refresh-status">Refresh</button>
                 <button class="secondary-button danger" id="stop-button" disabled>Stop Run</button>
               </div>
             </div>
-            <pre id="logs">Ready. Choose a workflow to begin.</pre>
+            <div class="log-shell">
+              <div class="log-meta">
+                <span>Auto-refreshes every 2 seconds</span>
+                <span id="log-line-count">0 lines</span>
+              </div>
+              <pre id="logs">Ready. Choose a workflow to begin.</pre>
+            </div>
           </section>
         </div>
 
@@ -116,12 +144,17 @@
             <div class="two-col">
               <label>
                 Start date
-                <input id="start_date" value="{{ defaults.start_date }}" placeholder="YYYY-MM-DD">
+                <input id="start_date" type="date" value="{{ defaults.start_date }}" placeholder="YYYY-MM-DD">
               </label>
               <label>
                 End date
-                <input id="end_date" value="{{ defaults.end_date }}" placeholder="YYYY-MM-DD">
+                <input id="end_date" type="date" value="{{ defaults.end_date }}" placeholder="YYYY-MM-DD">
               </label>
+            </div>
+
+            <div class="run-summary">
+              <span>Selected run window</span>
+              <strong id="date-window-label">{{ defaults.start_date }} to {{ defaults.end_date }}</strong>
             </div>
 
             <div class="option-group">

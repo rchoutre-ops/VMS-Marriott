@@ -48,6 +48,24 @@
         </div>
       </section>
 
+      <section class="insight-grid schedule-insights">
+        <article class="insight-card">
+          <span class="insight-label">Run time</span>
+          <strong id="schedule-time-summary">{{ config.time }} IST</strong>
+          <p>One daily attempt inside the configured grace window.</p>
+        </article>
+        <article class="insight-card">
+          <span class="insight-label">Sequence</span>
+          <strong>Data then assignments</strong>
+          <p>Assignments run only after the data workflow completes successfully.</p>
+        </article>
+        <article class="insight-card">
+          <span class="insight-label">Logs</span>
+          <strong>Latest + history</strong>
+          <p>Each cron run writes IST timestamps to the logging workbook.</p>
+        </article>
+      </section>
+
       <section class="dashboard-grid schedule-dashboard-grid">
         <section class="card settings-card">
           <div class="section-header">
@@ -124,6 +142,11 @@
                 <span class="step-number">2</span>
                 <strong>Assignments</strong>
                 <p>Starts only if Data Workflow succeeds. Builds assignment tabs and saves a workbook copy to the daily-assignment Drive folder.</p>
+              </div>
+              <div>
+                <span class="step-number">3</span>
+                <strong>Log archive</strong>
+                <p>Latest Logs shows the active run. Full Log History receives the completed run block after the chain finishes.</p>
               </div>
             </div>
           </section>

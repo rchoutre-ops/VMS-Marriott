@@ -5,6 +5,13 @@ const stopButton = document.querySelector("#stop-button");
 const toast = document.querySelector("#toast");
 const runButtons = [...document.querySelectorAll("[data-workflow]")];
 const nextRunValue = document.querySelector("#next-run-value");
+const copyLogButton = document.querySelector("#copy-log");
+const openLogSheetButton = document.querySelector("#open-log-sheet");
+const logLineCount = document.querySelector("#log-line-count");
+const startDateInput = document.querySelector("#start_date");
+const endDateInput = document.querySelector("#end_date");
+const dateWindowLabel = document.querySelector("#date-window-label");
+const LOG_SPREADSHEET_ID = "1veHtzoByPQfD7CDynmxJOTiH2ZuksqkxUnmG96alwYE";
 
 function formData() {
   return {
@@ -27,6 +34,35 @@ function showToast(message) {
   }, 4500);
 }
 
+function formatIstDateTime(value) {
+  if (!value) {
+    return "Not scheduled";
+  }
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    return value;
+  }
+  return new Intl.DateTimeFormat("en-IN", {
+    weekday: "short",
+    day: "2-digit",
+    month: "short",
+    hour: "numeric",
+    minute: "2-digit",
+    hour12: true,
+    timeZone: "Asia/Kolkata",
+    timeZoneName: "short",
+  }).format(parsed);
+}
+
+function updateDateWindowLabel() {
+  if (!dateWindowLabel) {
+    return;
+  }
+  const startDate = startDateInput.value || "Start date";
+  const endDate = endDateInput.value || "End date";
+  dateWindowLabel.textContent = `${startDate} to ${endDate}`;
+}
+
 function setRunning(isRunning) {
   runButtons.forEach((button) => {
     button.disabled = isRunning;
@@ -46,18 +82,34 @@ function updateRequirements(requirements) {
 }
 
 async function startWorkflow(workflow) {
-  const response = await fetch(`/run/${workflow}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(formData()),
-  });
-  const payload = await response.json();
-  if (!response.ok) {
-    showToast(payload.error || "Could not start workflow.");
-    return;
+  setRunning(true);
+  const clickedButton = runButtons.find((button) => button.dataset.workflow === workflow);
+  const originalLabel = clickedButton?.textContent;
+  if (clickedButton) {
+    clickedButton.textContent = "Starting...";
   }
-  showToast("Workflow started.");
-  await refreshStatus();
+  try {
+    const response = await fetch(`/run/${workflow}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(formData()),
+    });
+    const payload = await response.json();
+    if (!response.ok) {
+      showToast(payload.error || "Could not start workflow.");
+      setRunning(false);
+      return;
+    }
+    showToast("Workflow started.");
+    await refreshStatus();
+  } catch {
+    showToast("Could not reach the workflow server.");
+    setRunning(false);
+  } finally {
+    if (clickedButton && originalLabel) {
+      clickedButton.textContent = originalLabel;
+    }
+  }
 }
 
 async function stopWorkflow() {
@@ -82,12 +134,15 @@ async function refreshStatus() {
   setRunning(payload.running);
   updateRequirements(payload.requirements || {});
   if (nextRunValue) {
-    nextRunValue.textContent = payload.schedule?.next_run || "Not scheduled";
+    nextRunValue.textContent = formatIstDateTime(payload.schedule?.next_run);
   }
 
   if (payload.logs && payload.logs.length) {
     logs.textContent = payload.logs.join("");
     logs.scrollTop = logs.scrollHeight;
+    if (logLineCount) {
+      logLineCount.textContent = `${payload.logs.length} lines`;
+    }
   }
 }
 
@@ -99,6 +154,19 @@ stopButton.addEventListener("click", stopWorkflow);
 
 document.querySelector("#refresh-status").addEventListener("click", refreshStatus);
 
+copyLogButton.addEventListener("click", async () => {
+  try {
+    await navigator.clipboard.writeText(logs.textContent);
+    showToast("Log copied.");
+  } catch {
+    showToast("Could not copy log from this browser.");
+  }
+});
+
+openLogSheetButton.addEventListener("click", () => {
+  window.open(`https://docs.google.com/spreadsheets/d/${LOG_SPREADSHEET_ID}/edit`, "_blank", "noopener");
+});
+
 document.querySelector("#open-sheet").addEventListener("click", () => {
   const sheetId = document.querySelector("#target_spreadsheet_id").value.trim();
   if (!sheetId) {
@@ -108,5 +176,8 @@ document.querySelector("#open-sheet").addEventListener("click", () => {
   window.open(`https://docs.google.com/spreadsheets/d/${sheetId}/edit`, "_blank", "noopener");
 });
 
+startDateInput.addEventListener("input", updateDateWindowLabel);
+endDateInput.addEventListener("input", updateDateWindowLabel);
+updateDateWindowLabel();
 refreshStatus();
 window.setInterval(refreshStatus, 2000);
