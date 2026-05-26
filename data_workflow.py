@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from assignments import run_assignment_logic
 from marriott_workflow import (
+    append_tabs,
     build_snapshot_name,
     build_tabs,
     download_mode_export,
@@ -43,7 +44,10 @@ def main() -> None:
     if args.no_upload:
         return
 
-    upload_tabs(args, tabs)
+    if args.append_raw_tabs:
+        append_tabs(args, tabs)
+    else:
+        upload_tabs(args, tabs)
 
     if not args.no_assignment_logic:
         run_assignment_logic(args, tabs, upload_tabs)

@@ -199,6 +199,7 @@ import argparse
 import math
 import os
 import re
+import time
 import zipfile
 from datetime import date, datetime
 from io import BytesIO
@@ -212,6 +213,7 @@ import requests
 from bs4 import BeautifulSoup
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 from requests.auth import HTTPBasicAuth
 
 
@@ -335,6 +337,21 @@ def df_to_values(df: pd.DataFrame) -> list[list[Any]]:
     headers = [str(column) for column in df.columns]
     rows = [[clean_value(value) for value in row] for row in df.itertuples(index=False, name=None)]
     return [headers] + rows
+
+
+def execute_google_request(request: Any, description: str, attempts: int = 6) -> Any:
+    """Execute a Google API request with backoff for short quota bursts."""
+    for attempt in range(1, attempts + 1):
+        try:
+            return request.execute()
+        except HttpError as exc:
+            status = getattr(exc.resp, "status", None)
+            if status not in {429, 500, 503} or attempt == attempts:
+                raise
+            wait_seconds = min(60, 5 * attempt)
+            print(f"{description} hit Google API HTTP {status}; retrying in {wait_seconds}s ({attempt}/{attempts})")
+            time.sleep(wait_seconds)
+    raise RuntimeError(f"Google API request did not complete: {description}")
 
 
 def _mode_auth() -> HTTPBasicAuth:
@@ -1014,9 +1031,8 @@ def upload_tabs(args: argparse.Namespace, tabs: dict[str, pd.DataFrame]) -> None
         col_count = max(len(df.columns) + 5, 26)
 
         if title not in existing:
-            response = (
-                service.spreadsheets()
-                .batchUpdate(
+            response = execute_google_request(
+                service.spreadsheets().batchUpdate(
                     spreadsheetId=args.target_spreadsheet_id,
                     body={
                         "requests": [
@@ -1033,8 +1049,8 @@ def upload_tabs(args: argparse.Namespace, tabs: dict[str, pd.DataFrame]) -> None
                             }
                         ]
                     },
-                )
-                .execute()
+                ),
+                f"add sheet {title}",
             )
             existing[title] = response["replies"][0]["addSheet"]["properties"]
         else:
@@ -1081,6 +1097,136 @@ def upload_tabs(args: argparse.Namespace, tabs: dict[str, pd.DataFrame]) -> None
             ).execute()
 
         print(f"Updated {title}: {len(df)} rows x {len(df.columns)} columns")
+
+
+def _row_key(row: list[Any], width: int, headers: list[str] | None = None) -> tuple[str, ...]:
+    if headers:
+        normalized_headers = [str(header).strip().lower() for header in headers[:width]]
+        shift_id_indexes = [
+            index for index, header in enumerate(normalized_headers) if header in {"shift_id", "shiftgroup_id"}
+        ]
+        if shift_id_indexes and all(index < len(row) for index in shift_id_indexes):
+            stable_values = tuple(str(clean_value(row[index])).strip() for index in shift_id_indexes)
+            if all(stable_values):
+                return ("shift-key", *stable_values)
+        for stable_header in ("assignment id", "candidate id", "job posting id"):
+            if stable_header in normalized_headers:
+                index = normalized_headers.index(stable_header)
+                if index < len(row):
+                    stable_value = str(clean_value(row[index])).strip()
+                    if stable_value:
+                        return (stable_header, stable_value)
+    padded = [clean_value(value) for value in row[:width]]
+    padded.extend([""] * (width - len(padded)))
+    return tuple(str(value).strip() for value in padded)
+
+
+def append_tabs(args: argparse.Namespace, tabs: dict[str, pd.DataFrame]) -> None:
+    """Append only rows that are not already present in each destination tab."""
+    credentials = Credentials.from_service_account_file(
+        str(args.google_credentials),
+        scopes=["https://www.googleapis.com/auth/spreadsheets"],
+    )
+    service = build("sheets", "v4", credentials=credentials, cache_discovery=False)
+    spreadsheet = (
+        service.spreadsheets()
+        .get(
+            spreadsheetId=args.target_spreadsheet_id,
+            fields="sheets(properties(sheetId,title,gridProperties))",
+        )
+        .execute()
+    )
+    existing = {sheet["properties"]["title"]: sheet["properties"] for sheet in spreadsheet.get("sheets", [])}
+
+    for title, df in tabs.items():
+        values = df_to_values(df)
+        headers = values[0]
+        width = len(headers)
+        row_count = max(len(df) + 10, 100)
+        col_count = max(width + 5, 26)
+
+        if title not in existing:
+            response = execute_google_request(
+                service.spreadsheets().batchUpdate(
+                    spreadsheetId=args.target_spreadsheet_id,
+                    body={
+                        "requests": [
+                            {
+                                "addSheet": {
+                                    "properties": {
+                                        "title": title,
+                                        "gridProperties": {
+                                            "rowCount": row_count,
+                                            "columnCount": col_count,
+                                        },
+                                    }
+                                }
+                            }
+                        ]
+                    },
+                ),
+                f"add sheet {title}",
+            )
+            existing[title] = response["replies"][0]["addSheet"]["properties"]
+
+        existing_values = execute_google_request(
+            service.spreadsheets().values().get(spreadsheetId=args.target_spreadsheet_id, range=f"'{title}'"),
+            f"read existing values for {title}",
+        ).get("values", [])
+
+        if not existing_values:
+            end_col = column_name(width - 1)
+            chunk_size = 2000
+            for start in range(0, len(values), chunk_size):
+                chunk = values[start : start + chunk_size]
+                start_row = start + 1
+                end_row = start_row + len(chunk) - 1
+                update_range = f"'{title}'!A{start_row}:{end_col}{end_row}"
+                execute_google_request(
+                    service.spreadsheets().values().update(
+                        spreadsheetId=args.target_spreadsheet_id,
+                        range=update_range,
+                        valueInputOption="USER_ENTERED",
+                        body={"values": chunk},
+                    ),
+                    f"initialize {title} rows {start_row}-{end_row}",
+                )
+                time.sleep(1.1)
+            print(f"Initialized {title}: {len(df)} rows x {len(df.columns)} columns")
+            continue
+
+        existing_headers = [str(value).strip() for value in existing_values[0][:width]]
+        if existing_headers != headers:
+            raise RuntimeError(
+                f"Cannot append to '{title}' because existing headers do not match generated headers. "
+                "Clear or rename the tab before retrying."
+            )
+
+        seen = {_row_key(row, width, headers) for row in existing_values[1:]}
+        rows_to_append: list[list[Any]] = []
+        for row in values[1:]:
+            key = _row_key(row, width, headers)
+            if key in seen:
+                continue
+            seen.add(key)
+            rows_to_append.append(row)
+
+        if rows_to_append:
+            chunk_size = 2000
+            for start in range(0, len(rows_to_append), chunk_size):
+                chunk = rows_to_append[start : start + chunk_size]
+                execute_google_request(
+                    service.spreadsheets().values().append(
+                        spreadsheetId=args.target_spreadsheet_id,
+                        range=f"'{title}'!A:{column_name(width - 1)}",
+                        valueInputOption="USER_ENTERED",
+                        insertDataOption="INSERT_ROWS",
+                        body={"values": chunk},
+                    ),
+                    f"append {title} chunk starting {start + 1}",
+                )
+                time.sleep(1.1)
+        print(f"Appended {title}: {len(rows_to_append)} new rows ({len(df)} generated)")
 
 
 MODE_DECISION_HEADERS = [
@@ -1639,6 +1785,11 @@ def parse_args() -> argparse.Namespace:
         help="Build data frames and print counts, but do not update Google Sheets.",
     )
     parser.add_argument(
+        "--append-raw-tabs",
+        action="store_true",
+        help="Append only new rows to existing raw workflow tabs instead of clearing and replacing them.",
+    )
+    parser.add_argument(
         "--shared-drive-id",
         default=MARRIOTT_SHARED_DRIVE_ID,
         help="Shared Google Drive ID to drop the dated snapshot into.",
@@ -1681,7 +1832,10 @@ def main() -> None:
     if args.no_upload:
         return
 
-    upload_tabs(args, tabs)
+    if args.append_raw_tabs:
+        append_tabs(args, tabs)
+    else:
+        upload_tabs(args, tabs)
 
     if not args.no_assignment_logic:
         from assignments import run_assignment_logic

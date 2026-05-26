@@ -23,6 +23,7 @@ from googleapiclient.discovery import build
 
 APP_DIR = Path(__file__).resolve().parent
 DEFAULT_TARGET_SPREADSHEET_ID = "1gMYap7mOK17l7lOhPtBohGjJoC1FsPWfjyywXwFjLWk"
+RAW_HISTORY_SPREADSHEET_ID = "1whZ27g2ir6OP-ncmW9kA6R43CWMuFPsiK-IFLQoqi-8"
 RAW_DATA_FOLDER_ID = "1nPq1cEdPRlE5irYyetqYi24uTySFHv0J"
 ASSIGNMENT_FOLDER_ID = "1m-4NWsTQUQ51mJiQfMD-emhvm0qN1Fc_"
 LOG_SPREADSHEET_ID = "1veHtzoByPQfD7CDynmxJOTiH2ZuksqkxUnmG96alwYE"
@@ -388,7 +389,7 @@ def build_command(workflow: str, form: dict[str, Any], *, reuse_downloads: bool 
         "--workdir",
         str(APP_DIR),
         "--target-spreadsheet-id",
-        form["target_spreadsheet_id"].strip(),
+        RAW_HISTORY_SPREADSHEET_ID if workflow == "data" else form["target_spreadsheet_id"].strip(),
         "--google-credentials",
         str(credential_path()),
         "--start-date",
@@ -407,7 +408,7 @@ def build_command(workflow: str, form: dict[str, Any], *, reuse_downloads: bool 
         command.extend(["--force-fresh-mode-download", "--mode-max-retries", "5"])
 
     if workflow == "data":
-        command.append("--no-assignment-logic")
+        command.extend(["--no-assignment-logic", "--append-raw-tabs"])
     if form.get("skip_snapshot"):
         command.append("--no-snapshot")
     if form.get("dry_run"):
