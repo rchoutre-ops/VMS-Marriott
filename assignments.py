@@ -318,6 +318,59 @@ def apply_dept_overrides(mode_df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+import re as _re
+
+
+def _extract_dept_numeric(s: str) -> str:
+    """Extract the 4-digit numeric dept code from a dept string or OA Department Code.
+
+    Handles two formats:
+      - Mode / Simplify Dept Name:  '73R61_0230_00:...'  → '0230'
+      - OA Department Code:         '73 73R61 0230'       → '0230'
+    Returns '' if no 4-digit segment is found.
+    """
+    # Try underscore-delimited format first: e.g. 73R61_0230_00:...
+    m = _re.search(r"_(\d{4})_", str(s))
+    if m:
+        return m.group(1)
+    # Fall back to last whitespace-delimited token that is 4 digits: e.g. '73 73R61 0230'
+    tokens = str(s).strip().split()
+    if tokens:
+        last = tokens[-1]
+        if _re.fullmatch(r"\d{4}", last):
+            return last
+    return ""
+
+
+def _dept_codes_match(mode_dept: str, oa_row: "pd.Series") -> bool:  # type: ignore[type-arg]
+    """Return True when Mode and Open Active departments represent the same function.
+
+    Checks three conditions in order (most strict → most lenient):
+      1. Exact string match against OA Department Name.
+      2. Exact string match against OA Department Code (normalized).
+      3. Numeric dept segment (e.g. '0230') extracted from both sides matches.
+         This catches display-name divergence like:
+           Mode:  '73R61_0230_00:Banquets'
+           OA:    '73R61_0230_00:Half Moon Bay,Banquets'
+         where the 4-digit code (0230) is identical.
+    """
+    oa_dept_name = str(oa_row.get("Department Name", "")).strip()
+    oa_dept_code = _normalize_join_value(oa_row.get("Department Code", ""))
+
+    if mode_dept == oa_dept_name:
+        return True
+    if mode_dept == oa_dept_code:
+        return True
+
+    mode_num = _extract_dept_numeric(mode_dept)
+    oa_num_from_name = _extract_dept_numeric(oa_dept_name)
+    oa_num_from_code = _extract_dept_numeric(oa_dept_code)
+    if mode_num and mode_num in (oa_num_from_name, oa_num_from_code):
+        return True
+
+    return False
+
+
 def compute_local_decisions(
     mode_df: pd.DataFrame,
     open_active_df: pd.DataFrame,
@@ -406,7 +459,7 @@ def compute_local_decisions(
             if hits_idx:
                 hit = hits_idx[0]
                 s_aid = oa_assignment_id.iloc[hit]
-                if dept_code == _normalize_join_value(oa.iloc[hit].get("Department Code")) or dept_code == oa_dept.iloc[hit]:
+                if _dept_codes_match(dept_code, oa.iloc[hit]):
                     validation.append("OK")
                 else:
                     validation.append("Not OK")
@@ -565,13 +618,14 @@ def _reason_and_review(row: pd.Series) -> tuple[str, str]:
 # ── Amend-review tab ─────────────────────────────────────────────────────────
 
 def build_amend_tab(decisions_df: pd.DataFrame, open_closed_df: pd.DataFrame) -> pd.DataFrame:
-    """Rows where 2nd Best AID matched but department validation = Not OK.
+    """Informational tab: rows with 2nd Best AID but dept display-name mismatch.
 
-    These workers already have an open Simplify assignment at the right site/rate
-    but the department name differs between Mode and Simplify. They need ops review
-    before an amendment — not a new job posting.
+    NOTE: These rows are ALSO included in the Job Request tab (ops standard —
+    verified across WK18–WK21: ops never uses a separate Amend Review tab).
+    This tab is kept as a diagnostic reference only so the existing-assignment
+    context is visible during review.
     """
-    print("Assignment output build step: evaluating Amend Review rows.")
+    print("Assignment output build step: evaluating Amend Review rows (diagnostic only — rows also in Job Request).")
     print("  Rule: Perfect AID = 0 AND 2nd Best AID != 0 AND validation_for_Department = Not OK.")
     mask = (
         (decisions_df["Perfect AID"].astype(str) == "0")
@@ -593,9 +647,11 @@ def build_amend_tab(decisions_df: pd.DataFrame, open_closed_df: pd.DataFrame) ->
     simplify_dept = amend["2nd Best AID"].map(lambda a: str(oc_dept_by_aid.get(str(a), "")))
     mode_dept = pd.Series(dept_series).astype(str)
     reason = (
-        "Department mismatch — assignment exists at same site/worker/rate but department name differs. "
+        "[DIAGNOSTIC — row is also in Job Request tab] "
+        "Existing assignment found at same site/worker/rate but dept display name differs. "
         "Mode dept: " + mode_dept.values + " | Simplify dept: " + simplify_dept.values
-        + ". Verify if the assignment department needs updating before amending."
+        + ". Dept numeric code matches — this is a display-name divergence, not a true dept mismatch. "
+        "Post a new job request for the current period (ops standard)."
     )
     return pd.DataFrame(
         {
@@ -743,22 +799,38 @@ def build_job_request(
     decisions_df: pd.DataFrame,
     open_active_df: pd.DataFrame,
 ) -> pd.DataFrame:
-    """Mode rows that need a brand new Simplify job posting.
+    """Mode rows that need a new Simplify job posting.
 
-    Rows with an obvious discrepancy (rate mismatch, cross-property open
-    assignment, blank department, etc.) have the Reason column pre-filled and
-    Should be reviewed = Yes so ops can triage before creating a job.
+    Includes two cases:
+      1. No existing assignment found (Perfect AID = 0 AND 2nd Best AID = 0).
+      2. A 2nd Best AID exists (site+worker+rate match) but the department
+         validation is Not OK — ops creates a new job posting rather than
+         amending the existing assignment. Verified across WK18-WK21: ops
+         NEVER uses an Amend Review tab; all such rows go to Job Request.
+
+    Rows that need attention have Reason pre-filled and Status = "REVIEW".
     """
     print("Assignment output build step: evaluating Job Request rows.")
-    print("  Rule: Perfect AID = 0 AND 2nd Best AID = 0 AND CAN ID present.")
-    mask = (
+    print("  Rule: Perfect AID = 0 AND (2nd Best AID = 0 OR validation Not OK) AND CAN ID present.")
+    no_aid_mask = (
         (decisions_df["Perfect AID"].astype(str) == "0")
         & (decisions_df["2nd Best AID"].astype(str) == "0")
         & (decisions_df["CAN ID"].astype(str) != "0")
         & (decisions_df["CAN ID"].astype(str) != "")
     )
+    # Include ALL rows with a 2nd Best AID — ops never uses Amend Review;
+    # every site creates a new job posting rather than amending (verified WK18-WK21).
+    # Validation result is surfaced in Status/Reason for ops context only.
+    second_aid_mask = (
+        (decisions_df["Perfect AID"].astype(str) == "0")
+        & (~decisions_df["2nd Best AID"].astype(str).isin(["0", "", "nan"]))
+        & (decisions_df["CAN ID"].astype(str) != "0")
+        & (decisions_df["CAN ID"].astype(str) != "")
+    )
+    mask = no_aid_mask | second_aid_mask
     selected = decisions_df.loc[mask].copy()
-    print(f"  Job Request candidate rows: {len(selected)}")
+    selected["_has_second_aid"] = second_aid_mask[mask].values
+    print(f"  Job Request candidate rows: {len(selected)} ({no_aid_mask.sum()} no-AID + {second_aid_mask.sum()} existing-AID)")
     columns = [
         "Property ID",
         "Property Name",
@@ -790,13 +862,71 @@ def build_job_request(
     reason_review = selected.apply(_reason_and_review, axis=1, result_type="expand")
     reason_review.columns = ["_reason", "_review"]
 
-    return pd.DataFrame(
+    # For rows that have a 2nd Best AID (existing assignment with dept mismatch),
+    # override the reason and status to make the existing-assignment context visible.
+    has_second = selected["_has_second_aid"].astype(bool)
+    second_aid_col = selected["2nd Best AID"].astype(str)
+    simplify_dept_col: list[str] = []
+
+    if has_second.any():
+        try:
+            oa_dept_by_aid = open_active_df.set_index("Assignment ID")["Department Name"].to_dict()
+        except Exception:
+            oa_dept_by_aid = {}
+        for idx, row in selected.iterrows():
+            if has_second.loc[idx]:
+                aid = str(row.get("2nd Best AID", ""))
+                oa_dept = oa_dept_by_aid.get(aid, "")
+                mode_dept = str(row.get("Department_Code", "") or row.get("Department Code", ""))
+                validation = str(row.get("validation_for_Department", ""))
+                simplify_dept_col.append(oa_dept)
+                if validation == "OK":
+                    reason_review.at[idx, "_reason"] = (
+                        f"Existing Simplify assignment {aid} found and dept code matches "
+                        f"(Mode: '{mode_dept}' | Simplify: '{oa_dept}'). "
+                        "Create new job posting for this period — ops policy for this site "
+                        "requires fresh job requests each week rather than extending existing assignments."
+                    )
+                else:
+                    reason_review.at[idx, "_reason"] = (
+                        f"Existing Simplify assignment {aid} found at same site/worker/rate "
+                        f"but dept name differs — Mode: '{mode_dept}' | Simplify: '{oa_dept}'. "
+                        "Create new job posting for this period."
+                    )
+                reason_review.at[idx, "_review"] = "Yes"
+            else:
+                simplify_dept_col.append("")
+    else:
+        simplify_dept_col = [""] * len(selected)
+
+    # Status column: clearly marks rows needing ops action before they can be uploaded.
+    # "Existing AID → New JR" rows need a new job posting created first;
+    # once that job is approved and a Job ID (MAR-JB-xxxxx) exists, the row
+    # moves to the Upload tab. Plain no-AID rows are straightforward new jobs.
+    status_values = [
+        (
+            f"EXISTING AID: {str(row['2nd Best AID'])} — "
+            + ("Dept code matches, post new job" if str(row.get("validation_for_Department","")) == "OK"
+               else "Dept name differs, post new job")
+        ) if has_second.loc[idx] else ""
+        for idx, row in selected.iterrows()
+    ]
+
+    existing_aid_values = [
+        str(row["2nd Best AID"]) if has_second.loc[idx] else str(row.get("review_aid", ""))
+        for idx, row in selected.iterrows()
+    ]
+
+    # Build per-row pre-dedup frame
+    pre_dedup = pd.DataFrame(
         {
             "Property ID": selected["fieldglass_site_name"].astype(str).values,
             "Property Name": selected["location"].astype(str).values,
             "location": selected["location"].astype(str).values,
-            "CAN id": selected["CAN ID"].astype(str).values,
+            "_can_id": selected["CAN ID"].astype(str).values,
+            "_worker_id": selected["worker_id"].astype(str).values,
             "Shift": shift_dates.dt.strftime("%m/%d/%Y").fillna("").values,
+            "_shift_dt": shift_dates.values,
             "partner_rate": selected["partner_rate"].astype(str).values,
             "pro_rate": selected["pro_rate"].astype(str).values,
             "Pro Name": (selected["first_name"].astype(str) + " " + selected["last_name"].astype(str)).str.strip().values,
@@ -805,13 +935,57 @@ def build_job_request(
             "Department": pd.Series(department_series).astype(str).values,
             "Mark up": selected["mark_up"].astype(str).values,
             "State": selected["state_code"].astype(str).values,
-            "Reason for new Job(New Rate, Closed Assignment, Job Expired, open assignments but at different rates)": reason_review["_reason"].values,
-            "Notes:": "",
+            "_reason": reason_review["_reason"].values,
+            "_review": reason_review["_review"].values,
+            "Status": status_values,
+            "Existing AID": existing_aid_values,
+        }
+    ).reset_index(drop=True)
+
+    # Deduplicate: one JR row per worker (CAN ID or worker_id).
+    # Ops creates one job posting per worker covering all their shifts.
+    # Keep the earliest shift; collect all shift dates into Notes.
+    dedup_key = pre_dedup["_can_id"].where(
+        ~pre_dedup["_can_id"].isin(["0", "", "nan"]), pre_dedup["_worker_id"]
+    )
+    pre_dedup["_dedup_key"] = dedup_key
+
+    # Aggregate all shift dates per worker for the Notes column
+    all_shifts_by_key = (
+        pre_dedup.groupby("_dedup_key")["Shift"]
+        .apply(lambda s: ", ".join(sorted(set(s.dropna()))))
+        .to_dict()
+    )
+    # Sort by earliest shift, then dedup
+    pre_dedup["_shift_dt_safe"] = pd.to_datetime(pre_dedup["_shift_dt"], errors="coerce")
+    pre_dedup = pre_dedup.sort_values("_shift_dt_safe")
+    pre_dedup = pre_dedup.drop_duplicates(subset=["_dedup_key"], keep="first").reset_index(drop=True)
+    print(f"  Job Request rows after worker-level dedup: {len(pre_dedup)}")
+
+    all_shifts_notes = [all_shifts_by_key.get(k, "") for k in pre_dedup["_dedup_key"]]
+
+    return pd.DataFrame(
+        {
+            "Property ID": pre_dedup["Property ID"].values,
+            "Property Name": pre_dedup["Property Name"].values,
+            "location": pre_dedup["location"].values,
+            "CAN id": pre_dedup["_can_id"].values,
+            "Shift": pre_dedup["Shift"].values,
+            "partner_rate": pre_dedup["partner_rate"].values,
+            "pro_rate": pre_dedup["pro_rate"].values,
+            "Pro Name": pre_dedup["Pro Name"].values,
+            "Position": pre_dedup["Position"].values,
+            "shift name": pre_dedup["shift name"].values,
+            "Department": pre_dedup["Department"].values,
+            "Mark up": pre_dedup["Mark up"].values,
+            "State": pre_dedup["State"].values,
+            "Reason for new Job(New Rate, Closed Assignment, Job Expired, open assignments but at different rates)": pre_dedup["_reason"].values,
+            "Notes:": all_shifts_notes,
             "Becky Notes": "",
             "Comments": "",
-            "Status": "",
-            "Existing AID": selected["review_aid"].values,
-            "Should be reviewed": reason_review["_review"].values,
+            "Status": pre_dedup["Status"].values,
+            "Existing AID": pre_dedup["Existing AID"].values,
+            "Should be reviewed": pre_dedup["_review"].values,
         }
     ).reset_index(drop=True)
 
@@ -888,12 +1062,20 @@ def build_can_upload(decisions_df: pd.DataFrame) -> pd.DataFrame:
             "Middle Name": "",
             "Last Name": selected["last_name"].astype(str).values,
             "Date Of Birth(MM/DD)": dob_mmdd.values,
-            "State/National ID (Last 3 Digits)": "",
+            "State/National ID (Last 3 Digits)": "",  # OPS MUST FILL: last 3 digits of national/state ID
+            # Email format note: Simplify requires the Instawork platform alias
+            # ({FirstName}{last-3-SSN}@instawork.com), e.g. 'Leidy853@instawork.com'.
+            # We populate the personal email as reference; ops must replace with the
+            # @instawork.com alias before importing to Simplify.
             "Email Address": selected["email"].astype(str).values,
             "Site": [ctx.loc[w, "_site"] if w in ctx.index else "" for w in worker_ids],
             "Dept": [ctx.loc[w, "_dept"] if w in ctx.index else "" for w in worker_ids],
             "Shift Dates": [ctx.loc[w, "_shift_dates"] if w in ctx.index else "" for w in worker_ids],
-            "Reason": [ctx.loc[w, "_reason"] if w in ctx.index else "" for w in worker_ids],
+            "Reason": [
+                (ctx.loc[w, "_reason"] if w in ctx.index else "")
+                + " | ACTION REQUIRED: Replace Email Address with {FirstName}{SSN-last-3}@instawork.com format before importing to Simplify."
+                for w in worker_ids
+            ],
             "Should be reviewed": [ctx.loc[w, "_review"] if w in ctx.index else "No" for w in worker_ids],
         }
     ).reset_index(drop=True)

@@ -5,6 +5,12 @@ modules = ["python-3.11"]
 run = ["sh", "-c", "python app.py"]
 deploymentTarget = "cloudrun"
 
+# Cron: run the full daily workflow at 08:30 IST (03:00 UTC) every day.
+[[crons]]
+name = "Daily Marriott Run"
+schedule = "0 3 * * *"
+command = "python run_daily.py"
+
 [nix]
 channel = "stable-25_05"
 packages = ["glibcLocales"]
