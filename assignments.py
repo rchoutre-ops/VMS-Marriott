@@ -799,33 +799,40 @@ def build_job_request(
     decisions_df: pd.DataFrame,
     open_active_df: pd.DataFrame,
 ) -> pd.DataFrame:
-    """Mode rows that need a new Simplify job posting.
+    """Mode rows that need a new Simplify job posting (Case C3 + Case B-amend).
 
     Includes two cases:
-      1. No existing assignment found (Perfect AID = 0 AND 2nd Best AID = 0).
-      2. A 2nd Best AID exists (site+worker+rate match) but the department
-         validation is Not OK — ops creates a new job posting rather than
-         amending the existing assignment. Verified across WK18-WK21: ops
-         NEVER uses an Amend Review tab; all such rows go to Job Request.
+      1. No existing assignment (Perfect AID = 0 AND 2nd Best AID = 0) AND CAN ID exists.
+         → Worker is in Simplify but has no open job posting for this shift. Case C3.
+      2. 2nd Best AID exists but dept code is genuinely different (validation = 'Not OK').
+         → Worker has assignment for wrong dept; new job posting needed. Case B-amend.
 
-    Rows that need attention have Reason pre-filled and Status = "REVIEW".
+    EXCLUDED (corrected WK22 analysis):
+      - 2nd Best AID + validation = 'OK' → SKIP. Con1 failed only due to display-name
+        suffix difference; the existing AID already covers the worker correctly.
+
+    One row per shift — ops tracks each shift date individually in the JR pipeline.
     """
     print("Assignment output build step: evaluating Job Request rows.")
-    print("  Rule: Perfect AID = 0 AND (2nd Best AID = 0 OR validation Not OK) AND CAN ID present.")
+    print("  Rule: [No AID + CAN ID] OR [2nd Best AID + dept NOT OK]. One row per shift.")
     no_aid_mask = (
         (decisions_df["Perfect AID"].astype(str) == "0")
         & (decisions_df["2nd Best AID"].astype(str) == "0")
         & (decisions_df["CAN ID"].astype(str) != "0")
         & (decisions_df["CAN ID"].astype(str) != "")
     )
-    # Include ALL rows with a 2nd Best AID — ops never uses Amend Review;
-    # every site creates a new job posting rather than amending (verified WK18-WK21).
-    # Validation result is surfaced in Status/Reason for ops context only.
+    # Only include 2nd Best AID rows where dept code is genuinely different (Not OK).
+    # When validation = "OK" it means Con1 failed only due to display-name suffix
+    # divergence (e.g. "Banquets" vs "Half Moon Bay,Banquets") but the 4-digit dept
+    # code is identical — the existing AID already covers this worker correctly → SKIP.
+    # Confirmed WK22: 73R61 workers with "OK" validation have zero ops JR rows because
+    # their WK21-approved AIDs (end date 2027-01-31) still cover them.
     second_aid_mask = (
         (decisions_df["Perfect AID"].astype(str) == "0")
         & (~decisions_df["2nd Best AID"].astype(str).isin(["0", "", "nan"]))
         & (decisions_df["CAN ID"].astype(str) != "0")
         & (decisions_df["CAN ID"].astype(str) != "")
+        & (decisions_df["validation_for_Department"].astype(str) == "Not OK")
     )
     mask = no_aid_mask | second_aid_mask
     selected = decisions_df.loc[mask].copy()
@@ -942,27 +949,14 @@ def build_job_request(
         }
     ).reset_index(drop=True)
 
-    # Deduplicate: one JR row per worker (CAN ID or worker_id).
-    # Ops creates one job posting per worker covering all their shifts.
-    # Keep the earliest shift; collect all shift dates into Notes.
-    dedup_key = pre_dedup["_can_id"].where(
-        ~pre_dedup["_can_id"].isin(["0", "", "nan"]), pre_dedup["_worker_id"]
-    )
-    pre_dedup["_dedup_key"] = dedup_key
-
-    # Aggregate all shift dates per worker for the Notes column
-    all_shifts_by_key = (
-        pre_dedup.groupby("_dedup_key")["Shift"]
-        .apply(lambda s: ", ".join(sorted(set(s.dropna()))))
-        .to_dict()
-    )
-    # Sort by earliest shift, then dedup
+    # One JR row per shift (no dedup). Ops creates one row per shift date per
+    # worker so each individual shift can be tracked through the approval pipeline.
+    # Confirmed WK22: MAR-CD-235799 appears 6× in ops 337V2 JR — one per shift date.
     pre_dedup["_shift_dt_safe"] = pd.to_datetime(pre_dedup["_shift_dt"], errors="coerce")
-    pre_dedup = pre_dedup.sort_values("_shift_dt_safe")
-    pre_dedup = pre_dedup.drop_duplicates(subset=["_dedup_key"], keep="first").reset_index(drop=True)
-    print(f"  Job Request rows after worker-level dedup: {len(pre_dedup)}")
+    pre_dedup = pre_dedup.sort_values(["Property ID", "_shift_dt_safe"]).reset_index(drop=True)
+    print(f"  Job Request rows (one per shift): {len(pre_dedup)}")
 
-    all_shifts_notes = [all_shifts_by_key.get(k, "") for k in pre_dedup["_dedup_key"]]
+    all_shifts_notes = [""] * len(pre_dedup)
 
     return pd.DataFrame(
         {
@@ -1054,7 +1048,7 @@ def build_can_upload(decisions_df: pd.DataFrame) -> pd.DataFrame:
         .replace({"nan": "", "None": "", "NaN": ""})
         .str.replace(r"\.0$", "", regex=True)
     )
-    dob_mmdd = dob_mmdd.where(dob_mmdd.str.match(r"\d{2}/\d{2}", na=False), "")
+    dob_mmdd = dob_mmdd.where(dob_mmdd.str.match(r"\d{1,2}/\d{1,2}", na=False), "")
 
     return pd.DataFrame(
         {
