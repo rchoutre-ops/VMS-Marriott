@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
 import signal
 import subprocess
 import sys
@@ -12,11 +13,12 @@ import threading
 import time
 from collections import deque
 from datetime import datetime, timedelta, timezone
+from functools import wraps
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from flask import Flask, jsonify, render_template, request
+from flask import Flask, jsonify, redirect, render_template, request, session, url_for
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 
@@ -64,6 +66,42 @@ def load_local_env() -> None:
 load_local_env()
 
 app = Flask(__name__)
+app.secret_key = os.environ.get("FLASK_SECRET_KEY") or secrets.token_hex(32)
+
+# ── Google OAuth (optional – only active when credentials are set) ────────────
+ALLOWED_DOMAINS = {"instawork.com", "dr.instawork.com"}
+_oauth = None
+try:
+    from authlib.integrations.flask_client import OAuth as _AuthlibOAuth  # type: ignore[import]
+
+    _client_id = os.environ.get("GOOGLE_CLIENT_ID")
+    _client_secret = os.environ.get("GOOGLE_CLIENT_SECRET")
+    if _client_id and _client_secret:
+        _oauth = _AuthlibOAuth(app)
+        _oauth.register(
+            name="google",
+            client_id=_client_id,
+            client_secret=_client_secret,
+            server_metadata_url="https://accounts.google.com/.well-known/openid-configuration",
+            client_kwargs={"scope": "openid email profile"},
+        )
+except ImportError:
+    pass
+
+
+def login_required(f: Any) -> Any:
+    @wraps(f)
+    def decorated(*args: Any, **kwargs: Any) -> Any:
+        if _oauth is None:
+            return f(*args, **kwargs)
+        if "user" not in session:
+            return redirect(url_for("login_page"))
+        return f(*args, **kwargs)
+    return decorated
+
+
+def current_user() -> dict[str, str] | None:
+    return session.get("user")
 
 RUN_LOCK = threading.Lock()
 RUN_STATE: dict[str, Any] = {
@@ -638,7 +676,54 @@ def start_scheduler_once() -> None:
     thread.start()
 
 
+@app.get("/login")
+def login_page() -> Any:
+    if _oauth is None:
+        return redirect(url_for("index"))
+    if "user" in session:
+        return redirect(url_for("index"))
+    return render_template("login.html", error=request.args.get("error"))
+
+
+@app.get("/auth/google")
+def auth_google() -> Any:
+    if _oauth is None:
+        return redirect(url_for("index"))
+    redirect_uri = url_for("auth_callback", _external=True)
+    return _oauth.google.authorize_redirect(redirect_uri)
+
+
+@app.get("/auth/callback")
+def auth_callback() -> Any:
+    if _oauth is None:
+        return redirect(url_for("index"))
+    try:
+        token = _oauth.google.authorize_access_token()
+    except Exception as exc:
+        return redirect(url_for("login_page", error=f"OAuth error: {exc}"))
+    user_info = token.get("userinfo") or {}
+    email = user_info.get("email", "")
+    domain = email.split("@")[-1].lower() if "@" in email else ""
+    if domain not in ALLOWED_DOMAINS:
+        return redirect(url_for("login_page", error=f"Access denied. Only @instawork.com and @dr.instawork.com accounts are allowed."))
+    session["user"] = {
+        "email": email,
+        "name": user_info.get("name", email),
+        "picture": user_info.get("picture", ""),
+    }
+    return redirect(url_for("index"))
+
+
+@app.get("/logout")
+def logout() -> Any:
+    session.pop("user", None)
+    if _oauth is None:
+        return redirect(url_for("index"))
+    return redirect(url_for("login_page"))
+
+
 @app.get("/")
+@login_required
 def index() -> str:
     start_date, end_date = default_assignment_window()
     return render_template(
@@ -650,10 +735,12 @@ def index() -> str:
             "skip_snapshot": False,
         },
         requirements=requirements_status(),
+        user=current_user(),
     )
 
 
 @app.get("/schedule")
+@login_required
 def schedule_page() -> str:
     config = load_schedule_config()
     next_run = next_scheduled_run(config)
@@ -662,10 +749,12 @@ def schedule_page() -> str:
         config=config,
         next_run=next_run.isoformat(timespec="minutes") if next_run else "Disabled",
         requirements=requirements_status(),
+        user=current_user(),
     )
 
 
 @app.get("/api/schedule")
+@login_required
 def schedule_api() -> Any:
     config = load_schedule_config()
     next_run = next_scheduled_run(config)
@@ -679,6 +768,7 @@ def schedule_api() -> Any:
 
 
 @app.post("/api/schedule")
+@login_required
 def update_schedule_api() -> tuple[Any, int]:
     payload = request.get_json(force=True)
     config = load_schedule_config()
@@ -703,6 +793,7 @@ def update_schedule_api() -> tuple[Any, int]:
 
 
 @app.post("/api/schedule/run-now")
+@login_required
 def run_schedule_now_api() -> tuple[Any, int]:
     config = load_schedule_config()
     error = validate_schedule_config(config)
@@ -718,6 +809,7 @@ def run_schedule_now_api() -> tuple[Any, int]:
 
 
 @app.post("/run/<workflow>")
+@login_required
 def run_workflow(workflow: str) -> tuple[Any, int]:
     form = request.get_json(force=True)
     label = "Data Workflow" if workflow == "data" else "Assignments"
@@ -760,6 +852,7 @@ def run_workflow(workflow: str) -> tuple[Any, int]:
 
 
 @app.post("/stop")
+@login_required
 def stop_workflow() -> tuple[Any, int]:
     with RUN_LOCK:
         process = RUN_STATE.get("process")
@@ -776,6 +869,7 @@ def stop_workflow() -> tuple[Any, int]:
 
 
 @app.get("/status")
+@login_required
 def status() -> Any:
     schedule_config = load_schedule_config()
     next_run = next_scheduled_run(schedule_config)

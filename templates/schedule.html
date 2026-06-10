@@ -1,175 +1,161 @@
-<!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Marriott Schedule</title>
-    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
-  </head>
-  <body>
-    <main class="shell">
-      <nav class="topbar">
-        <a class="brand" href="/">
-          <span class="brand-mark">M</span>
-          <span>
-            <strong>Marriott Automation</strong>
-            <small>VMS operations console</small>
-          </span>
-        </a>
-        <div class="nav-links">
-          <a class="nav-link" href="/">Dashboard</a>
-          <a class="nav-link active" href="/schedule">Schedule</a>
-        </div>
-      </nav>
+{% extends "base.html" %}
+{% block title %}Schedule — VMS Marriott{% endblock %}
+{% block nav_schedule %}active{% endblock %}
 
-      <section class="hero hero-panel">
+{% block content %}
+<div class="page-header">
+  <div>
+    <h1 class="page-title">Daily Schedule</h1>
+    <p class="page-subtitle">Configure the automated daily chain: Data Workflow → Assignments. All times are IST.</p>
+  </div>
+  <div class="global-run-badge">
+    <span class="online-dot" style="{% if config.enabled %}background:var(--green){% else %}background:var(--ink-faint){% endif %}"></span>
+    <span id="schedule-state" style="font-weight:700">{{ "Enabled" if config.enabled else "Disabled" }}</span>
+    <span class="badge-sep">·</span>
+    <span style="color:var(--ink-muted);font-size:12px">Next: <strong id="next-run">{{ next_run }}</strong></span>
+  </div>
+</div>
+
+<div class="insight-row">
+  <div class="insight-chip">
+    <div class="insight-chip-label">Run time</div>
+    <div class="insight-chip-value" id="schedule-time-summary">{{ config.time }} IST</div>
+    <div class="insight-chip-note">One attempt per day</div>
+  </div>
+  <div class="insight-chip">
+    <div class="insight-chip-label">Sequence</div>
+    <div class="insight-chip-value">Data → Assignments</div>
+    <div class="insight-chip-note">Assignments run only if Data succeeds</div>
+  </div>
+  <div class="insight-chip">
+    <div class="insight-chip-label">Last run</div>
+    <div class="insight-chip-value">{{ config.last_status or "—" }}</div>
+    <div class="insight-chip-note">{{ config.last_started_at or "No previous run" }}</div>
+  </div>
+</div>
+
+<div class="schedule-layout">
+
+  <!-- Main schedule config -->
+  <div class="aside-card" style="padding:24px">
+    <span class="card-label">Schedule Configuration</span>
+
+    <div class="toggle-group" style="margin-bottom:18px">
+      <div class="toggle-row">
+        <input id="enabled" type="checkbox" {% if config.enabled %}checked{% endif %}>
         <div>
-          <p class="eyebrow">Automation Schedule</p>
-          <h1>Daily Run Settings</h1>
-          <p class="subtitle">Control the hands-free daily chain. All scheduled times are IST (Asia/Kolkata). Data Workflow runs first; Assignments starts only after the data refresh finishes successfully.</p>
-          <div class="hero-meta">
-            <span>Default 08:30</span>
-            <span>Asia/Kolkata</span>
-            <span>Data then assignments</span>
+          <div class="toggle-label" style="font-size:14px">Enable daily automated run</div>
+          <span class="toggle-hint">When enabled, the chain fires once per day at the configured time.</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="two-col" style="margin-bottom:14px">
+      <div class="form-group">
+        <label class="form-label">Run time</label>
+        <input class="form-input" id="time" type="time" value="{{ config.time }}">
+        <span class="form-hint">Runs once daily in IST.</span>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Timezone</label>
+        <input class="form-input" id="timezone" value="Asia/Kolkata (IST)" readonly>
+        <span class="form-hint">Fixed for all scheduled runs.</span>
+      </div>
+    </div>
+
+    <div class="form-group">
+      <label class="form-label">Target Google Sheet ID</label>
+      <input class="form-input" id="target_spreadsheet_id" value="{{ config.target_spreadsheet_id }}">
+      <span class="form-hint">Both daily steps update this workbook before Drive snapshots are saved.</span>
+    </div>
+
+    <div class="toggle-group">
+      <div class="toggle-group-label">Scheduled run options</div>
+      <div class="toggle-row">
+        <input id="skip_snapshot" type="checkbox" {% if config.skip_snapshot %}checked{% endif %}>
+        <div>
+          <div class="toggle-label">Skip Drive snapshot</div>
+          <span class="toggle-hint">Not recommended for production daily runs.</span>
+        </div>
+      </div>
+      <div class="toggle-row">
+        <input id="dry_run" type="checkbox" {% if config.dry_run %}checked{% endif %}>
+        <div>
+          <div class="toggle-label">Dry run only</div>
+          <span class="toggle-hint">Build data without writing to Sheets.</span>
+        </div>
+      </div>
+      <div class="toggle-row">
+        <input id="keep_all_candidates" type="checkbox" {% if config.keep_all_candidates %}checked{% endif %}>
+        <div>
+          <div class="toggle-label">Keep all candidates</div>
+          <span class="toggle-hint">Overrides active-candidate filter.</span>
+        </div>
+      </div>
+      <div class="toggle-row">
+        <input id="keep_all_jobs" type="checkbox" {% if config.keep_all_jobs %}checked{% endif %}>
+        <div>
+          <div class="toggle-label">Keep all jobs</div>
+          <span class="toggle-hint">Overrides sourcing/open-job filter.</span>
+        </div>
+      </div>
+    </div>
+
+    <div style="display:flex;gap:10px;margin-top:18px">
+      <button class="btn-primary" id="save-schedule">Save Schedule</button>
+      <button class="btn-secondary" id="run-now">Run Chain Now</button>
+    </div>
+  </div>
+
+  <!-- Aside: sequence + checks -->
+  <aside class="aside-column">
+
+    <div class="aside-card">
+      <span class="card-label">What runs daily</span>
+      <div class="timeline-list">
+        <div class="timeline-item">
+          <div class="timeline-num">1</div>
+          <div class="timeline-body">
+            <strong>Data Workflow</strong>
+            <p>Fresh Mode run, fresh Simplify downloads, source tabs updated, raw-data snapshot saved to Drive.</p>
           </div>
         </div>
-        <div class="status-stack">
-          <div class="status-card primary-status">
-            <span class="status-dot"></span>
-            <div>
-              <p class="status-label">Next run</p>
-              <p class="status-value" id="next-run">{{ next_run }}</p>
-            </div>
-          </div>
-          <div class="mini-card">
-            <p class="status-label">Current state</p>
-            <strong id="schedule-state">{{ "Enabled" if config.enabled else "Disabled" }}</strong>
+        <div class="timeline-item">
+          <div class="timeline-num">2</div>
+          <div class="timeline-body">
+            <strong>Assignments</strong>
+            <p>Starts only if Data Workflow succeeds. Builds decision columns + output tabs, saves assignment snapshot to Drive.</p>
           </div>
         </div>
-      </section>
-
-      <section class="insight-grid schedule-insights">
-        <article class="insight-card">
-          <span class="insight-label">Run time</span>
-          <strong id="schedule-time-summary">{{ config.time }} IST</strong>
-          <p>One daily attempt inside the configured grace window.</p>
-        </article>
-        <article class="insight-card">
-          <span class="insight-label">Sequence</span>
-          <strong>Data then assignments</strong>
-          <p>Assignments run only after the data workflow completes successfully.</p>
-        </article>
-        <article class="insight-card">
-          <span class="insight-label">Logs</span>
-          <strong>Latest + history</strong>
-          <p>Each cron run writes IST timestamps to the logging workbook.</p>
-        </article>
-      </section>
-
-      <section class="dashboard-grid schedule-dashboard-grid">
-        <section class="card settings-card">
-          <div class="section-header">
-            <div>
-              <p class="eyebrow">Daily Automation</p>
-              <h2>Schedule Controls</h2>
-              <p class="section-copy">Set when the full chain should start. The schedule uses the current N-1, N, N+1 Marriott window each day.</p>
-            </div>
+        <div class="timeline-item">
+          <div class="timeline-num">3</div>
+          <div class="timeline-body">
+            <strong>Log archive</strong>
+            <p>Latest Logs shows the active run. Full Log History receives the completed run block after the chain finishes.</p>
           </div>
+        </div>
+      </div>
+    </div>
 
-          <div class="option-group highlight-option">
-            <label class="toggle large-toggle">
-              <input id="enabled" type="checkbox" {% if config.enabled %}checked{% endif %}>
-              <span><strong>Enable daily scheduled run</strong><small>When enabled, Replit starts the chain during the configured time window.</small></span>
-            </label>
-          </div>
+    <div class="aside-card">
+      <span class="card-label">System Checks</span>
+      <ul class="req-list" id="requirements">
+        {% for key, ok in requirements.items() %}
+        <li class="req-item {{ 'ok' if ok else 'warn' }}">
+          {{ key.replace('_', ' ').title() }}
+          <span class="req-badge">{{ 'OK' if ok else 'Needs setup' }}</span>
+        </li>
+        {% endfor %}
+      </ul>
+      <div class="note-box" style="margin-top:12px">
+        The app must be running for the in-app scheduler to fire. Use <strong>Run Chain Now</strong> for a manual end-to-end test.
+      </div>
+    </div>
 
-          <div class="two-col">
-            <label>
-              Run time
-              <input id="time" type="time" value="{{ config.time }}">
-              <span class="field-help">Runs once daily inside a short IST grace window.</span>
-            </label>
-            <label>
-              Timezone
-              <input id="timezone" value="Asia/Kolkata (IST)" readonly>
-              <span class="field-help">Fixed for all cron/scheduled runs.</span>
-            </label>
-          </div>
+  </aside>
+</div>
+{% endblock %}
 
-          <label>
-            Target Google Sheet ID
-            <input id="target_spreadsheet_id" value="{{ config.target_spreadsheet_id }}">
-            <span class="field-help">Both scheduled steps update this workbook before Drive copies are saved.</span>
-          </label>
-
-          <div class="option-group">
-            <p class="option-title">Scheduled run options</p>
-            <label class="toggle">
-              <input id="skip_snapshot" type="checkbox" {% if config.skip_snapshot %}checked{% endif %}>
-              <span><strong>Skip Google Drive save</strong><small>Not recommended for production daily runs.</small></span>
-            </label>
-            <label class="toggle">
-              <input id="dry_run" type="checkbox" {% if config.dry_run %}checked{% endif %}>
-              <span><strong>Dry run only</strong><small>Useful for testing the chain without writing sheet updates.</small></span>
-            </label>
-            <label class="toggle">
-              <input id="keep_all_candidates" type="checkbox" {% if config.keep_all_candidates %}checked{% endif %}>
-              <span><strong>Keep all Candidate Details rows</strong><small>Overrides the active-candidate filter.</small></span>
-            </label>
-            <label class="toggle">
-              <input id="keep_all_jobs" type="checkbox" {% if config.keep_all_jobs %}checked{% endif %}>
-              <span><strong>Keep all Job Status rows</strong><small>Overrides sourcing/open-job filtering.</small></span>
-            </label>
-          </div>
-
-          <div class="button-row">
-            <button class="primary-button compact" id="save-schedule">Save Schedule</button>
-            <button class="secondary-button" id="run-now">Run Chain Now</button>
-          </div>
-        </section>
-
-        <aside class="side-column">
-          <section class="card settings-card">
-            <p class="eyebrow">Run Sequence</p>
-            <h2>What Happens Daily</h2>
-            <div class="timeline elevated-timeline">
-              <div>
-                <span class="step-number">1</span>
-                <strong>Data Workflow</strong>
-                <p>Fresh Mode run, fresh Simplify downloads, source tabs updated, workbook copy saved to the raw-data Drive folder.</p>
-              </div>
-              <div>
-                <span class="step-number">2</span>
-                <strong>Assignments</strong>
-                <p>Starts only if Data Workflow succeeds. Builds assignment tabs and saves a workbook copy to the daily-assignment Drive folder.</p>
-              </div>
-              <div>
-                <span class="step-number">3</span>
-                <strong>Log archive</strong>
-                <p>Latest Logs shows the active run. Full Log History receives the completed run block after the chain finishes.</p>
-              </div>
-            </div>
-          </section>
-
-          <section class="card settings-card">
-            <p class="eyebrow">Readiness</p>
-            <h2>System Checks</h2>
-            <div class="requirements compact-requirements">
-              <ul id="requirements">
-                {% for key, ok in requirements.items() %}
-                  <li class="{{ 'ok' if ok else 'warn' }}">{{ key.replace('_', ' ').title() }}</li>
-                {% endfor %}
-              </ul>
-            </div>
-            <div class="note">
-              Replit must be deployed and running for the in-app scheduler to fire. Use <strong>Run Chain Now</strong> for a manual end-to-end test. Each run clears Latest Logs first, then appends the completed run to Full Log History.
-            </div>
-          </section>
-        </aside>
-      </section>
-    </main>
-
-    <div class="toast" id="toast" hidden></div>
-    <script src="{{ url_for('static', filename='schedule.js') }}"></script>
-  </body>
-</html>
+{% block scripts %}
+<script src="{{ url_for('static', filename='schedule.js') }}"></script>
+{% endblock %}

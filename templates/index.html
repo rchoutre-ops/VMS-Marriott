@@ -1,207 +1,201 @@
-<!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Marriott Automation</title>
-    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
-  </head>
-  <body>
-    <main class="shell">
-      <nav class="topbar">
-        <a class="brand" href="/">
-          <span class="brand-mark">M</span>
-          <span>
-            <strong>Marriott Automation</strong>
-            <small>VMS operations console</small>
-          </span>
-        </a>
-        <div class="nav-links">
-          <a class="nav-link active" href="/">Dashboard</a>
-          <a class="nav-link" href="/schedule">Schedule</a>
-        </div>
-      </nav>
+{% extends "base.html" %}
+{% block title %}Dashboard — VMS Marriott{% endblock %}
+{% block nav_dashboard %}active{% endblock %}
 
-      <section class="hero hero-panel">
-        <div>
-          <p class="eyebrow">Instawork Operations</p>
-          <h1>Daily Marriott VMS Control Center</h1>
-          <p class="subtitle">Refresh Mode and Simplify data, build assignment outputs, and save the right workbook copies to Drive without touching the terminal.</p>
-          <div class="hero-meta">
-            <span>Fresh Mode runs</span>
-            <span>N-1, N, N+1 window</span>
-            <span>Drive saves on by default</span>
+{% block content %}
+<div class="page-header">
+  <div>
+    <h1 class="page-title">Marriott VMS Pipeline</h1>
+    <p class="page-subtitle">Refresh Mode and Simplify data, build assignment outputs, snapshot to Drive.</p>
+  </div>
+  <div class="global-run-badge">
+    <span class="status-dot" id="status-dot"></span>
+    <span class="badge-workflow" id="status-value">Ready</span>
+    <span class="badge-sep">·</span>
+    <span id="next-run-label" style="color:var(--ink-muted);font-size:12px;">Next run: <span id="next-run-value">—</span></span>
+    <button class="btn-danger btn-sm" id="stop-button" disabled>Stop</button>
+  </div>
+</div>
+
+<div class="insight-row">
+  <div class="insight-chip">
+    <div class="insight-chip-label">Current window</div>
+    <div class="insight-chip-value">{{ defaults.start_date }}</div>
+    <div class="insight-chip-note">to {{ defaults.end_date }} &nbsp;·&nbsp; N-1, N, N+1</div>
+  </div>
+  <div class="insight-chip">
+    <div class="insight-chip-label">Schedule</div>
+    <div class="insight-chip-value" id="schedule-time-display">08:30 IST</div>
+    <div class="insight-chip-note">Daily automated run</div>
+  </div>
+  <div class="insight-chip">
+    <div class="insight-chip-label">Logs</div>
+    <div class="insight-chip-value">Latest + history</div>
+    <div class="insight-chip-note">Written to logging workbook</div>
+  </div>
+</div>
+
+<div class="main-layout">
+  <div class="steps-column">
+
+    <!-- Step 1: Data Workflow -->
+    <div class="step-card">
+      <div class="step-card-header">
+        <div class="step-number">1</div>
+        <div class="step-title-group">
+          <div class="step-title">Data Workflow</div>
+          <div class="step-desc">Downloads fresh Mode and Simplify reports, rebuilds all source tabs, saves raw-data snapshot to Drive.</div>
+        </div>
+        <div class="status-badge idle" id="data-badge">Idle</div>
+      </div>
+      <div class="pipeline-steps">
+        <div class="pipeline-step"><span class="pipeline-dot"></span>Download Mode</div>
+        <span class="pipeline-arrow">›</span>
+        <div class="pipeline-step"><span class="pipeline-dot"></span>Download Simplify</div>
+        <span class="pipeline-arrow">›</span>
+        <div class="pipeline-step"><span class="pipeline-dot"></span>Build Tabs</div>
+        <span class="pipeline-arrow">›</span>
+        <div class="pipeline-step"><span class="pipeline-dot"></span>Upload Sheets</div>
+        <span class="pipeline-arrow">›</span>
+        <div class="pipeline-step"><span class="pipeline-dot"></span>Snapshot Drive</div>
+      </div>
+      <div class="step-actions">
+        <button class="btn-secondary" data-workflow="data" id="dry-data-btn" onclick="setDryRun(true)" style="display:none">Dry Run</button>
+        <button class="btn-primary" data-workflow="data">Run Data Workflow</button>
+      </div>
+    </div>
+
+    <!-- Step 2: Assignments -->
+    <div class="step-card">
+      <div class="step-card-header">
+        <div class="step-number">2</div>
+        <div class="step-title-group">
+          <div class="step-title">Assignments</div>
+          <div class="step-desc">Applies decision engine, builds Upload / Job Request / CAN Upload output tabs, snapshots assignment workbook to Drive.</div>
+        </div>
+        <div class="status-badge idle" id="asgn-badge">Idle</div>
+      </div>
+      <div class="pipeline-steps">
+        <div class="pipeline-step"><span class="pipeline-dot"></span>Compute Decisions</div>
+        <span class="pipeline-arrow">›</span>
+        <div class="pipeline-step"><span class="pipeline-dot"></span>Build Output Tabs</div>
+        <span class="pipeline-arrow">›</span>
+        <div class="pipeline-step"><span class="pipeline-dot"></span>Upload Tabs</div>
+        <span class="pipeline-arrow">›</span>
+        <div class="pipeline-step"><span class="pipeline-dot"></span>Highlight Reviews</div>
+        <span class="pipeline-arrow">›</span>
+        <div class="pipeline-step"><span class="pipeline-dot"></span>Snapshot Drive</div>
+      </div>
+      <div class="step-actions">
+        <button class="btn-primary" style="background:var(--green-dim);border-color:var(--green)" data-workflow="assignments">Run Assignments</button>
+      </div>
+    </div>
+
+    <!-- Live Log -->
+    <div class="log-card">
+      <div class="log-header">
+        <span class="log-title">Live Log</span>
+        <div class="log-actions">
+          <button class="btn-secondary btn-sm" id="copy-log">Copy</button>
+          <button class="btn-secondary btn-sm" id="open-log-sheet">Open Log Sheet</button>
+          <button class="btn-secondary btn-sm" id="refresh-status">Refresh</button>
+        </div>
+      </div>
+      <div class="log-meta">
+        <span>Auto-refreshes every 2 s</span>
+        <span id="log-line-count">0 lines</span>
+      </div>
+      <pre id="logs">Ready. Choose a workflow to begin.</pre>
+    </div>
+
+  </div><!-- /steps-column -->
+
+  <aside class="aside-column">
+
+    <!-- Controls -->
+    <div class="aside-card">
+      <span class="card-label">Run Controls</span>
+
+      <div class="form-group">
+        <label class="form-label">Target Google Sheet ID</label>
+        <input class="form-input" id="target_spreadsheet_id" value="{{ defaults.target_spreadsheet_id }}">
+        <span class="form-hint">Sheet that receives live tab updates before Drive copies are saved.</span>
+      </div>
+
+      <div class="two-col">
+        <div class="form-group">
+          <label class="form-label">Start date</label>
+          <input class="form-input" id="start_date" type="date" value="{{ defaults.start_date }}">
+        </div>
+        <div class="form-group">
+          <label class="form-label">End date</label>
+          <input class="form-input" id="end_date" type="date" value="{{ defaults.end_date }}">
+        </div>
+      </div>
+
+      <div class="date-window-pill">
+        <span>Window:</span>
+        <strong id="date-window-label">{{ defaults.start_date }} → {{ defaults.end_date }}</strong>
+      </div>
+
+      <div class="toggle-group">
+        <div class="toggle-group-label">Options</div>
+        <div class="toggle-row">
+          <input id="skip_snapshot" type="checkbox" {% if defaults.skip_snapshot %}checked{% endif %}>
+          <div>
+            <div class="toggle-label">Skip Drive snapshot</div>
+            <span class="toggle-hint">Use for tests only.</span>
           </div>
         </div>
-        <div class="status-stack">
-          <div class="status-card primary-status">
-            <span class="status-dot" id="status-dot"></span>
-            <div>
-              <p class="status-label">Current status</p>
-              <p class="status-value" id="status-value" aria-live="polite">Ready</p>
-            </div>
-          </div>
-          <div class="mini-card">
-            <p class="status-label">Next scheduled run</p>
-            <strong id="next-run-value">Loading...</strong>
+        <div class="toggle-row">
+          <input id="dry_run" type="checkbox">
+          <div>
+            <div class="toggle-label">Dry run</div>
+            <span class="toggle-hint">Build data, don't write to Sheets.</span>
           </div>
         </div>
-      </section>
-
-      <section class="insight-grid">
-        <article class="insight-card">
-          <span class="insight-label">Current window</span>
-          <strong>{{ defaults.start_date }} to {{ defaults.end_date }}</strong>
-          <p>N-1, N, N+1 Marriott operating range.</p>
-        </article>
-        <article class="insight-card">
-          <span class="insight-label">Run logging</span>
-          <strong>Latest + history</strong>
-          <p>Every manual and scheduled run writes IST logs to the logging workbook.</p>
-        </article>
-        <article class="insight-card">
-          <span class="insight-label">Automation clock</span>
-          <strong>Asia/Kolkata</strong>
-          <p>Scheduled jobs are fixed to IST for predictable daily execution.</p>
-        </article>
-      </section>
-
-      <section class="dashboard-grid">
-        <div class="main-column">
-          <section class="workflow-grid">
-            <article class="card workflow-card pro-card">
-              <div class="workflow-header">
-                <div class="card-icon">D</div>
-                <span class="chip">Step 1</span>
-              </div>
-              <h2>Data Workflow</h2>
-              <p>Downloads fresh Mode and Simplify reports, updates source tabs, and saves a raw-data copy to Drive.</p>
-              <ul class="feature-list">
-                <li>Mode CSV: forced fresh run</li>
-                <li>Simplify: assignments, candidates, jobs</li>
-                <li>Drive folder: raw data archive</li>
-                <li>Latest Logs cleared and rebuilt for this run</li>
-              </ul>
-              <button class="primary-button" data-workflow="data">Run Data Workflow</button>
-            </article>
-
-            <article class="card workflow-card pro-card">
-              <div class="workflow-header">
-                <div class="card-icon accent">A</div>
-                <span class="chip accent-chip">Step 2</span>
-              </div>
-              <h2>Assignments</h2>
-              <p>Builds assignment formulas and output tabs after the source data is current.</p>
-              <ul class="feature-list">
-                <li>Upload, Job Request, CAN Upload</li>
-                <li>Output, Sheet8, Summary templates</li>
-                <li>Drive folder: daily assignments</li>
-                <li>Rule and formula order logged in detail</li>
-              </ul>
-              <button class="primary-button accent-button" data-workflow="assignments">Run Assignments</button>
-            </article>
-          </section>
-
-          <section class="card log-card">
-            <div class="section-header">
-              <div>
-                <p class="eyebrow">Live Output</p>
-                <h2>Run Log</h2>
-                <p class="section-copy">Watch progress, Mode retry attempts, Simplify exports, sheet updates, and Drive saves in one place.</p>
-              </div>
-              <div class="button-row tight">
-                <button class="secondary-button" id="copy-log">Copy Log</button>
-                <button class="secondary-button" id="open-log-sheet">Open Logs Sheet</button>
-                <button class="secondary-button" id="refresh-status">Refresh</button>
-                <button class="secondary-button danger" id="stop-button" disabled>Stop Run</button>
-              </div>
-            </div>
-            <div class="log-shell">
-              <div class="log-meta">
-                <span>Auto-refreshes every 2 seconds</span>
-                <span id="log-line-count">0 lines</span>
-              </div>
-              <pre id="logs">Ready. Choose a workflow to begin.</pre>
-            </div>
-          </section>
+        <div class="toggle-row">
+          <input id="keep_all_candidates" type="checkbox">
+          <div>
+            <div class="toggle-label">Keep all candidates</div>
+            <span class="toggle-hint">Skip active-only filter.</span>
+          </div>
         </div>
+        <div class="toggle-row">
+          <input id="keep_all_jobs" type="checkbox">
+          <div>
+            <div class="toggle-label">Keep all jobs</div>
+            <span class="toggle-hint">Skip sourcing/open-job filter.</span>
+          </div>
+        </div>
+      </div>
 
-        <aside class="side-column">
-          <section class="card settings-card">
-            <div class="section-header">
-              <div>
-                <p class="eyebrow">Run Setup</p>
-                <h2>Controls</h2>
-              </div>
-            </div>
+      <div style="display:flex;gap:8px;margin-top:4px">
+        <button class="btn-secondary btn-sm" id="open-sheet">Open Sheet</button>
+        <a class="btn-secondary btn-sm" href="/schedule" style="display:inline-flex;align-items:center;text-decoration:none">Edit Schedule</a>
+      </div>
+    </div>
 
-            <label>
-              Target Google Sheet ID
-              <input id="target_spreadsheet_id" value="{{ defaults.target_spreadsheet_id }}">
-              <span class="field-help">Workbook that receives the live tab updates before copies are saved.</span>
-            </label>
+    <!-- System Checks -->
+    <div class="aside-card">
+      <span class="card-label">System Checks</span>
+      <ul class="req-list" id="requirements">
+        {% for key, ok in requirements.items() %}
+        <li class="req-item {{ 'ok' if ok else 'warn' }}">
+          {{ key.replace('_', ' ').title() }}
+          <span class="req-badge">{{ 'OK' if ok else 'Needs setup' }}</span>
+        </li>
+        {% endfor %}
+      </ul>
+      <div class="note-box success" style="margin-top:12px">
+        Default: every run triggers fresh Mode + Simplify downloads. Drive snapshots are on by default.
+      </div>
+    </div>
 
-            <div class="two-col">
-              <label>
-                Start date
-                <input id="start_date" type="date" value="{{ defaults.start_date }}" placeholder="YYYY-MM-DD">
-              </label>
-              <label>
-                End date
-                <input id="end_date" type="date" value="{{ defaults.end_date }}" placeholder="YYYY-MM-DD">
-              </label>
-            </div>
+  </aside>
+</div>
+{% endblock %}
 
-            <div class="run-summary">
-              <span>Selected run window</span>
-              <strong id="date-window-label">{{ defaults.start_date }} to {{ defaults.end_date }}</strong>
-            </div>
-
-            <div class="option-group">
-              <p class="option-title">Run options</p>
-              <label class="toggle">
-                <input id="skip_snapshot" type="checkbox" {% if defaults.skip_snapshot %}checked{% endif %}>
-                <span><strong>Skip Google Drive save</strong><small>Use only for tests where no archive copy is needed.</small></span>
-              </label>
-              <label class="toggle">
-                <input id="dry_run" type="checkbox">
-                <span><strong>Dry run only</strong><small>Prepare data and counts without updating Google Sheets.</small></span>
-              </label>
-              <label class="toggle">
-                <input id="keep_all_candidates" type="checkbox">
-                <span><strong>Keep all candidates</strong><small>Do not filter Candidate Details to active candidates only.</small></span>
-              </label>
-              <label class="toggle">
-                <input id="keep_all_jobs" type="checkbox">
-                <span><strong>Keep all jobs</strong><small>Do not filter Job Status to open sourcing jobs.</small></span>
-              </label>
-            </div>
-
-            <div class="button-row">
-              <button class="secondary-button" id="open-sheet">Open Sheet</button>
-              <a class="secondary-link" href="/schedule">Edit Schedule</a>
-            </div>
-          </section>
-
-          <section class="card settings-card">
-            <p class="eyebrow">System Readiness</p>
-            <h2>Checks</h2>
-            <div class="requirements compact-requirements">
-              <ul id="requirements">
-                {% for key, ok in requirements.items() %}
-                  <li class="{{ 'ok' if ok else 'warn' }}">{{ key.replace('_', ' ').title() }}</li>
-                {% endfor %}
-              </ul>
-            </div>
-            <div class="note success-note">
-              <strong>Default behavior:</strong> every run uses fresh Mode and Simplify downloads. Data Workflow saves to raw-data Drive; Assignments saves to daily-assignment Drive. Latest Logs and Full Log History are written to the logging workbook.
-            </div>
-          </section>
-        </aside>
-      </section>
-    </main>
-
-    <div class="toast" id="toast" hidden></div>
-    <script src="{{ url_for('static', filename='app.js') }}"></script>
-  </body>
-</html>
+{% block scripts %}
+<script src="{{ url_for('static', filename='app.js') }}"></script>
+{% endblock %}
