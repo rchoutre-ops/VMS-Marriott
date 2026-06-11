@@ -748,14 +748,21 @@ def download_simplify_reports(args: argparse.Namespace) -> dict[str, Path]:
 
         for page_index, page_id in enumerate(page_ids, start=1):
             body = {"pages": [{"page_id": page_id, "filters": {}}]}
-            response = requests.post(
-                (
-                    "https://api-v3reporting.simplifyvmsapp.com/api/sigma/workbook/"
-                    f"{report_id}/csv_post?email={args.simplify_export_email}"
-                ),
-                json=body,
-                timeout=120,
+            url = (
+                "https://api-v3reporting.simplifyvmsapp.com/api/sigma/workbook/"
+                f"{report_id}/csv_post?email={args.simplify_export_email}"
             )
+
+            response = None
+            for attempt in range(1, 4):
+                time.sleep(3 * attempt)
+                response = requests.post(url, json=body, timeout=120)
+                if response.ok or response.status_code == 500:
+                    break
+                print(
+                    f"  Retry {attempt}/3 for {report_name} page {page_index} "
+                    f"({page_id}): HTTP {response.status_code}"
+                )
 
             if not response.ok:
                 print(

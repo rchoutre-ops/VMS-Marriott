@@ -711,7 +711,7 @@ def _highlight_review_rows(
 
 def highlight_review_tabs(args: Any, output_tabs: dict[str, pd.DataFrame]) -> None:
     """Apply red highlighting to all 'Should be reviewed = Yes' rows across output tabs."""
-    review_tabs = [t for t in ("job request", "can upload", "amend review", "provisional match") if t in output_tabs]
+    review_tabs = [t for t in ("Final Assignment", "job request", "can upload", "amend review", "provisional match") if t in output_tabs]
     if not review_tabs:
         return
     credentials = Credentials.from_service_account_file(
@@ -731,7 +731,8 @@ def highlight_review_tabs(args: Any, output_tabs: dict[str, pd.DataFrame]) -> No
         if tab_name not in sheet_id_by_title:
             print(f"  Tab '{tab_name}' not found in spreadsheet — skipping highlight.")
             continue
-        _highlight_review_rows(service, args.target_spreadsheet_id, sheet_id_by_title[tab_name], df)
+        review_col = "Should Review" if tab_name == "Final Assignment" else "Should be reviewed"
+        _highlight_review_rows(service, args.target_spreadsheet_id, sheet_id_by_title[tab_name], df, review_col)
 
 
 # ── Provisional-match tab ────────────────────────────────────────────────────
@@ -1097,6 +1098,80 @@ def build_can_output(can_upload_df: pd.DataFrame) -> pd.DataFrame:
     return output[cols].reset_index(drop=True)
 
 
+def build_final_assignment_tab(decisions_df: pd.DataFrame) -> pd.DataFrame:
+    """Consolidated master view of every Mode shift with its final action status.
+
+    Combines all decision columns into a single human-readable ops reference tab.
+    """
+    print("Assignment output build step: creating Final Assignment master view.")
+    df = decisions_df.copy()
+
+    perfect_aid = df["Perfect AID"].astype(str)
+    second_aid  = df["2nd Best AID"].astype(str)
+    validation  = df["validation_for_Department"].astype(str)
+    can_id      = df["CAN ID"].astype(str)
+    dept_review = df.get("dept_review_flag", pd.Series([""] * len(df), index=df.index)).astype(str)
+    dept_confirm = df.get("dept_needs_confirm", pd.Series([False] * len(df), index=df.index)).astype(bool)
+
+    actions, reasons = [], []
+    for i in df.index:
+        p_aid = perfect_aid.iloc[i]
+        s_aid = second_aid.iloc[i]
+        val   = validation.iloc[i]
+        can   = can_id.iloc[i]
+        rev   = dept_review.iloc[i]
+        conf  = dept_confirm.iloc[i]
+
+        if rev:
+            actions.append("REVIEW")
+            reasons.append(f"Dept ambiguous — {rev}")
+        elif p_aid != "0":
+            if conf:
+                actions.append("ASSIGNED (provisional)")
+                reasons.append("Perfect AID found via provisional dept override — verify dept with property")
+            else:
+                actions.append("ASSIGNED")
+                reasons.append(f"Perfect AID found: {p_aid}")
+        elif s_aid != "0":
+            if val == "OK":
+                actions.append("ASSIGNED")
+                reasons.append(f"2nd Best AID found, dept validates OK: {s_aid}")
+            else:
+                actions.append("JOB REQUEST")
+                reasons.append(f"2nd Best AID {s_aid} found but dept mismatch — new job posting needed")
+        elif can not in ("0", "", "nan"):
+            actions.append("JOB REQUEST")
+            reasons.append(f"Worker in Simplify (CAN {can}) but no open assignment for this shift — create job posting")
+        else:
+            actions.append("CAN UPLOAD")
+            reasons.append("Worker has no Candidate ID in Simplify — create candidate record first")
+
+    shift_dates = pd.to_datetime(df["date_of_shift_start"], errors="coerce")
+    dept_col = "Department_Code" if "Department_Code" in df.columns else "Department Code"
+
+    result = pd.DataFrame({
+        "Worker Name":   (df["first_name"].astype(str) + " " + df["last_name"].astype(str)).str.strip().values,
+        "Worker ID":     df["worker_id"].astype(str).values,
+        "Site":          df["fieldglass_site_name"].astype(str).values,
+        "Location":      df["location"].astype(str).values,
+        "Dept":          df[dept_col].astype(str).values,
+        "Shift Date":    shift_dates.dt.strftime("%m/%d/%Y").fillna("").values,
+        "Partner Rate":  df["partner_rate"].astype(str).values,
+        "Action":        actions,
+        "Reason":        reasons,
+        "CAN ID":        can_id.values,
+        "Perfect AID":   perfect_aid.values,
+        "2nd Best AID":  second_aid.values,
+        "Should Review": ["Yes" if a == "REVIEW" else "No" for a in actions],
+    })
+    print(f"  Final Assignment rows: {len(result)} "
+          f"(ASSIGNED: {actions.count('ASSIGNED') + actions.count('ASSIGNED (provisional)')}, "
+          f"JOB REQUEST: {actions.count('JOB REQUEST')}, "
+          f"CAN UPLOAD: {actions.count('CAN UPLOAD')}, "
+          f"REVIEW: {actions.count('REVIEW')})")
+    return result.reset_index(drop=True)
+
+
 def build_output_template() -> pd.DataFrame:
     """Empty `Output` tab template for post-import tracking."""
     print("Assignment output build step: creating Output template for post-import tracking.")
@@ -1148,8 +1223,9 @@ def build_assignment_tabs(tabs: dict[str, pd.DataFrame]) -> tuple[dict[str, pd.D
     decisions = _add_discrepancy_cols(decisions, tabs["Open & Closed"])
     print("  Step 2: build CAN Upload from missing-CAN decision rows.")
     can_upload_df = build_can_upload(decisions)
-    print("  Step 3: build output tabs in this order: upload, job request, can upload, can output, amend review, provisional match, Output, Sheet8, Summary.")
+    print("  Step 3: build output tabs in this order: Final Assignment, upload, job request, can upload, can output, amend review, provisional match, Output, Sheet8, Summary.")
     output_tabs = {
+        "Final Assignment": build_final_assignment_tab(decisions),
         "upload": build_upload(decisions),
         "job request": build_job_request(decisions, tabs["Open Active"]),
         "can upload": can_upload_df,

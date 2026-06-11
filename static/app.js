@@ -24,6 +24,7 @@ function formData() {
     dry_run:               document.querySelector("#dry_run").checked,
     keep_all_candidates:   document.querySelector("#keep_all_candidates").checked,
     keep_all_jobs:         document.querySelector("#keep_all_jobs").checked,
+    reuse_downloads:       document.querySelector("#reuse_downloads").checked,
   };
 }
 

@@ -24,13 +24,27 @@ from googleapiclient.discovery import build
 
 
 APP_DIR = Path(__file__).resolve().parent
-DEFAULT_TARGET_SPREADSHEET_ID = "1gMYap7mOK17l7lOhPtBohGjJoC1FsPWfjyywXwFjLWk"
-RAW_HISTORY_SPREADSHEET_ID = "1whZ27g2ir6OP-ncmW9kA6R43CWMuFPsiK-IFLQoqi-8"
-RAW_DATA_FOLDER_ID = "1nPq1cEdPRlE5irYyetqYi24uTySFHv0J"
+
+# ── Testing sheet (all outputs go here) ──────────────────────────────────────
+TESTING_SPREADSHEET_ID       = "1oaemJH65gMQz0nhicL5YmxzeMl6vpSFo0O5NZqCzssQ"
+
+# Route all workflows + logs to the testing sheet
+DEFAULT_TARGET_SPREADSHEET_ID = TESTING_SPREADSHEET_ID
+RAW_HISTORY_SPREADSHEET_ID    = TESTING_SPREADSHEET_ID
+LOG_SPREADSHEET_ID            = TESTING_SPREADSHEET_ID
+
+# Production sheet IDs (kept for reference, not active during testing)
+_PROD_TARGET_SPREADSHEET_ID   = "1gMYap7mOK17l7lOhPtBohGjJoC1FsPWfjyywXwFjLWk"
+_PROD_RAW_HISTORY_ID          = "1whZ27g2ir6OP-ncmW9kA6R43CWMuFPsiK-IFLQoqi-8"
+_PROD_LOG_SHEET_ID            = "1veHtzoByPQfD7CDynmxJOTiH2ZuksqkxUnmG96alwYE"
+
+RAW_DATA_FOLDER_ID   = "1nPq1cEdPRlE5irYyetqYi24uTySFHv0J"
 ASSIGNMENT_FOLDER_ID = "1m-4NWsTQUQ51mJiQfMD-emhvm0qN1Fc_"
-LOG_SPREADSHEET_ID = "1veHtzoByPQfD7CDynmxJOTiH2ZuksqkxUnmG96alwYE"
-LATEST_LOGS_TAB = "Latest Logs"
-FULL_LOG_HISTORY_TAB = "Full Log History"
+
+# Write logs into the "Logs" tab the user created in the testing sheet.
+# "Logs History" is auto-created to accumulate across runs.
+LATEST_LOGS_TAB      = "Logs"
+FULL_LOG_HISTORY_TAB = "Logs History"
 SNAPSHOT_TIMEZONE = "Asia/Kolkata"
 MAX_LOG_LINES = 1500
 SCHEDULE_CONFIG_PATH = APP_DIR / "schedule_config.json"
@@ -443,7 +457,7 @@ def build_command(workflow: str, form: dict[str, Any], *, reuse_downloads: bool 
     if reuse_downloads:
         command.append("--skip-downloads")
     else:
-        command.extend(["--force-fresh-mode-download", "--mode-max-retries", "5"])
+        command.extend(["--mode-max-retries", "3"])
 
     if workflow == "data":
         command.extend(["--no-assignment-logic", "--append-raw-tabs"])
@@ -732,7 +746,7 @@ def index() -> str:
             "target_spreadsheet_id": DEFAULT_TARGET_SPREADSHEET_ID,
             "start_date": start_date,
             "end_date": end_date,
-            "skip_snapshot": False,
+            "skip_snapshot": True,
         },
         requirements=requirements_status(),
         user=current_user(),
@@ -819,7 +833,7 @@ def run_workflow(workflow: str) -> tuple[Any, int]:
         return jsonify({"ok": False, "error": error}), 400
 
     try:
-        command = build_command(workflow, form)
+        command = build_command(workflow, form, reuse_downloads=bool(form.get("reuse_downloads")))
     except ValueError as exc:
         return jsonify({"ok": False, "error": str(exc)}), 400
 
