@@ -777,31 +777,157 @@ def build_provisional_match_tab(decisions_df: pd.DataFrame) -> pd.DataFrame:
 
 # ── Upload tab (Simplify direct-assignment rows) ─────────────────────────────
 
-def build_upload(decisions_df: pd.DataFrame) -> pd.DataFrame:
-    """Rows ready for Simplify direct assignment once Available Jobs is chosen."""
-    print("Assignment output build step: upload tab template created.")
-    print("  Rule: rows require Perfect AID = 0, 2nd Best AID = 0, CAN ID present, and manually selected Available Jobs.")
-    print("  Current implementation keeps upload empty until Available Jobs is chosen in Mode.")
-    return pd.DataFrame(
-        columns=[
-            "Candidate ID",
-            "Job ID",
-            "Available Start Date (MM/DD/YYYY)",
-            "Available End Date (MM/DD/YYYY)",
-            "Client Bill Rate",
-            "Pay Rate",
-            "City Tax",
-            "State Tax",
-            "Vendor Tracking ID 1",
-            "Vendor Tracking ID 2",
-            "Vendor Tracking ID 3",
-        ]
+UPLOAD_COLUMNS = [
+    "Candidate ID",
+    "Job ID",
+    "Available Start Date (MM/DD/YYYY)",
+    "Available End Date (MM/DD/YYYY)",
+    "Client Bill Rate",
+    "Pay Rate",
+    "City Tax",
+    "State Tax",
+    "Vendor Tracking ID 1",
+    "Vendor Tracking ID 2",
+    "Vendor Tracking ID 3",
+    "Worker Name",
+    "Shift Date",
+    "Site",
+    "Dept",
+    "Match Note",
+]
+
+
+def _auto_match_jobs(decisions_df: pd.DataFrame, jobs_df: pd.DataFrame) -> tuple[pd.DataFrame, set]:
+    """Auto-match unassigned Mode shifts to open Sourcing job postings.
+
+    Match rules (strict + smart pick):
+      1. Mode shift must be eligible: Perfect AID = 0 AND 2nd Best AID = 0 AND CAN ID present.
+         (This excludes any worker with an existing Simplify assignment.)
+      2. Job must be Sourcing status.
+      3. Department must match exactly.
+      4. Site must match (parsed from 'Job Work Location' = '<site> - <name>').
+      5. Shift date must fall within Job Start/End Date.
+      6. Job must have open slots (Number of Submissions < Number of Positions).
+      7. If multiple jobs match → pick the one with the most open slots,
+         tie-break on most recent Job Create Date.
+
+    Returns (matches_df, matched_decision_indices).
+      - matches_df: one row per matched shift with full Upload columns populated.
+      - matched_decision_indices: set of decisions_df indices that were auto-matched
+        (used by build_job_request to skip these rows).
+    """
+    print("Assignment output build step: auto-matching Sourcing jobs to unassigned shifts.")
+    matched_idx: set = set()
+    if jobs_df is None or jobs_df.empty:
+        print("  No job status data available — skipping auto-match.")
+        return pd.DataFrame(columns=UPLOAD_COLUMNS), matched_idx
+
+    eligible_mask = (
+        (decisions_df["Perfect AID"].astype(str) == "0")
+        & (decisions_df["2nd Best AID"].astype(str) == "0")
+        & (decisions_df["CAN ID"].astype(str) != "0")
+        & (decisions_df["CAN ID"].astype(str) != "")
+        & (decisions_df["CAN ID"].astype(str) != "nan")
     )
+    eligible = decisions_df.loc[eligible_mask].copy()
+    print(f"  Eligible no-AID shifts to attempt: {len(eligible)}")
+    if eligible.empty:
+        return pd.DataFrame(columns=UPLOAD_COLUMNS), matched_idx
+
+    jobs = jobs_df.copy()
+    jobs = jobs[jobs["Job Status"].astype(str).str.strip().str.lower() == "sourcing"]
+    jobs["_start"] = pd.to_datetime(jobs["Job Start Date"], errors="coerce")
+    jobs["_end"] = pd.to_datetime(jobs["Job End Date"], errors="coerce")
+    jobs["_created"] = pd.to_datetime(jobs.get("Job Create Date"), errors="coerce")
+    jobs["_dept"] = jobs["Department"].astype(str).str.strip()
+    jobs["_site"] = jobs["Job Work Location"].astype(str).str.split(" - ", n=1).str[0].str.strip()
+    jobs["_positions"] = pd.to_numeric(jobs["Number of Positions"], errors="coerce").fillna(0)
+    jobs["_submissions"] = pd.to_numeric(jobs["Number of Submissions"], errors="coerce").fillna(0)
+    jobs["_open"] = jobs["_positions"] - jobs["_submissions"]
+    jobs = jobs[jobs["_open"] > 0]
+    print(f"  Open Sourcing jobs available: {len(jobs)}")
+
+    dept_col = "Department_Code" if "Department_Code" in eligible.columns else "Department Code"
+    rate_col = "partner_rate"
+
+    matches: list[dict] = []
+    no_match_count = 0
+    multi_match_count = 0
+
+    for idx, row in eligible.iterrows():
+        site = str(row.get("fieldglass_site_name", "")).strip()
+        dept = str(row.get(dept_col, "")).strip()
+        rate = str(row.get(rate_col, "")).strip()
+        shift_dt = pd.to_datetime(row.get("date_of_shift_start"), errors="coerce")
+        if not site or not dept or pd.isna(shift_dt):
+            no_match_count += 1
+            continue
+
+        candidates = jobs[
+            (jobs["_site"] == site)
+            & (jobs["_dept"] == dept)
+            & (jobs["_start"] <= shift_dt)
+            & (jobs["_end"] >= shift_dt)
+        ]
+        if candidates.empty:
+            no_match_count += 1
+            continue
+
+        if len(candidates) > 1:
+            multi_match_count += 1
+            candidates = candidates.sort_values(["_open", "_created"], ascending=[False, False])
+
+        chosen = candidates.iloc[0]
+        match_note = "auto-matched"
+        if len(candidates) > 1:
+            match_note = f"auto-matched (1 of {len(candidates)} candidates; picked highest open slots)"
+
+        matches.append({
+            "Candidate ID": str(row.get("CAN ID", "")),
+            "Job ID": str(chosen["Job ID"]),
+            "Available Start Date (MM/DD/YYYY)": shift_dt.strftime("%m/%d/%Y"),
+            "Available End Date (MM/DD/YYYY)": shift_dt.strftime("%m/%d/%Y"),
+            "Client Bill Rate": rate,
+            "Pay Rate": str(row.get("pro_rate", "")),
+            "City Tax": "",
+            "State Tax": "",
+            "Vendor Tracking ID 1": str(row.get("worker_id", "")),
+            "Vendor Tracking ID 2": str(row.get("shift_id", "")),
+            "Vendor Tracking ID 3": "",
+            "Worker Name": (str(row.get("first_name", "")) + " " + str(row.get("last_name", ""))).strip(),
+            "Shift Date": shift_dt.strftime("%m/%d/%Y"),
+            "Site": site,
+            "Dept": dept,
+            "Match Note": match_note,
+        })
+        matched_idx.add(idx)
+
+    print(f"  Auto-matched {len(matches)} shifts; {no_match_count} had no Sourcing job; {multi_match_count} had multiple candidates.")
+    return pd.DataFrame(matches, columns=UPLOAD_COLUMNS), matched_idx
+
+
+def build_upload(
+    decisions_df: pd.DataFrame,
+    jobs_df: pd.DataFrame | None = None,
+) -> tuple[pd.DataFrame, set]:
+    """Build Upload tab by auto-matching unassigned shifts to open Sourcing jobs.
+
+    Returns (upload_df, matched_indices). matched_indices is the set of decision
+    rows that were successfully auto-matched — build_job_request uses this to
+    avoid double-listing the same shift.
+    """
+    print("Assignment output build step: building Upload tab from auto-matched Sourcing jobs.")
+    print("  Rule: Perfect AID = 0, 2nd Best AID = 0, CAN ID present, dept+site+date+open-slots match an open Sourcing job.")
+    if jobs_df is None or jobs_df.empty:
+        print("  job status tab is empty — Upload tab will be empty.")
+        return pd.DataFrame(columns=UPLOAD_COLUMNS), set()
+    return _auto_match_jobs(decisions_df, jobs_df)
 
 
 def build_job_request(
     decisions_df: pd.DataFrame,
     open_active_df: pd.DataFrame,
+    upload_matched_indices: set | None = None,
 ) -> pd.DataFrame:
     """Mode rows that need a new Simplify job posting (Case C3 + Case B-amend).
 
@@ -839,9 +965,15 @@ def build_job_request(
         & (decisions_df["validation_for_Department"].astype(str) == "Not OK")
     )
     mask = no_aid_mask | second_aid_mask
+    if upload_matched_indices:
+        upload_match_mask = decisions_df.index.isin(upload_matched_indices)
+        skipped = int((mask & upload_match_mask).sum())
+        if skipped:
+            print(f"  Skipping {skipped} rows already auto-matched to Upload tab.")
+        mask = mask & ~upload_match_mask
     selected = decisions_df.loc[mask].copy()
     selected["_has_second_aid"] = second_aid_mask[mask].values
-    print(f"  Job Request candidate rows: {len(selected)} ({no_aid_mask.sum()} no-AID + {second_aid_mask.sum()} existing-AID)")
+    print(f"  Job Request candidate rows: {len(selected)} ({(no_aid_mask & mask).sum()} no-AID + {(second_aid_mask & mask).sum()} existing-AID)")
     columns = [
         "Property ID",
         "Property Name",
@@ -1101,13 +1233,18 @@ def build_can_output(can_upload_df: pd.DataFrame) -> pd.DataFrame:
     return output[cols].reset_index(drop=True)
 
 
-def build_final_assignment_tab(decisions_df: pd.DataFrame) -> pd.DataFrame:
+def build_final_assignment_tab(
+    decisions_df: pd.DataFrame,
+    upload_matched_indices: set | None = None,
+) -> pd.DataFrame:
     """Consolidated master view of every Mode shift with its final action status.
 
     Combines all decision columns into a single human-readable ops reference tab.
+    Shifts that were auto-matched to a Sourcing job are tagged 'UPLOAD'.
     """
     print("Assignment output build step: creating Final Assignment master view.")
     df = decisions_df.copy()
+    matched = upload_matched_indices or set()
 
     perfect_aid = df["Perfect AID"].astype(str)
     second_aid  = df["2nd Best AID"].astype(str)
@@ -1124,6 +1261,7 @@ def build_final_assignment_tab(decisions_df: pd.DataFrame) -> pd.DataFrame:
         can   = can_id.iloc[i]
         rev   = dept_review.iloc[i]
         conf  = dept_confirm.iloc[i]
+        is_matched = i in matched
 
         if rev:
             actions.append("REVIEW")
@@ -1142,9 +1280,12 @@ def build_final_assignment_tab(decisions_df: pd.DataFrame) -> pd.DataFrame:
             else:
                 actions.append("JOB REQUEST")
                 reasons.append(f"2nd Best AID {s_aid} found but dept mismatch — new job posting needed")
+        elif is_matched:
+            actions.append("UPLOAD")
+            reasons.append("Auto-matched to open Sourcing job — ready for direct assignment in Simplify")
         elif can not in ("0", "", "nan"):
             actions.append("JOB REQUEST")
-            reasons.append(f"Worker in Simplify (CAN {can}) but no open assignment for this shift — create job posting")
+            reasons.append(f"Worker in Simplify (CAN {can}) but no matching open Sourcing job for this shift — create job posting")
         else:
             actions.append("CAN UPLOAD")
             reasons.append("Worker has no Candidate ID in Simplify — create candidate record first")
@@ -1152,12 +1293,17 @@ def build_final_assignment_tab(decisions_df: pd.DataFrame) -> pd.DataFrame:
     shift_dates = pd.to_datetime(df["date_of_shift_start"], errors="coerce")
     dept_col = "Department_Code" if "Department_Code" in df.columns else "Department Code"
 
+    position_col = df["position"].astype(str) if "position" in df.columns else pd.Series([""] * len(df), index=df.index)
+    shift_id_col = df["shift_id"].astype(str) if "shift_id" in df.columns else pd.Series([""] * len(df), index=df.index)
+
     result = pd.DataFrame({
         "Worker Name":   (df["first_name"].astype(str) + " " + df["last_name"].astype(str)).str.strip().values,
         "Worker ID":     df["worker_id"].astype(str).values,
+        "Shift ID":      shift_id_col.values,
         "Site":          df["fieldglass_site_name"].astype(str).values,
         "Location":      df["location"].astype(str).values,
         "Dept":          df[dept_col].astype(str).values,
+        "Position":      position_col.values,
         "Shift Date":    shift_dates.dt.strftime("%m/%d/%Y").fillna("").values,
         "Partner Rate":  df["partner_rate"].astype(str).values,
         "Action":        actions,
@@ -1169,6 +1315,7 @@ def build_final_assignment_tab(decisions_df: pd.DataFrame) -> pd.DataFrame:
     })
     print(f"  Final Assignment rows: {len(result)} "
           f"(ASSIGNED: {actions.count('ASSIGNED') + actions.count('ASSIGNED (provisional)')}, "
+          f"UPLOAD: {actions.count('UPLOAD')}, "
           f"JOB REQUEST: {actions.count('JOB REQUEST')}, "
           f"CAN UPLOAD: {actions.count('CAN UPLOAD')}, "
           f"REVIEW: {actions.count('REVIEW')})")
@@ -1226,11 +1373,13 @@ def build_assignment_tabs(tabs: dict[str, pd.DataFrame]) -> tuple[dict[str, pd.D
     decisions = _add_discrepancy_cols(decisions, tabs["Open & Closed"])
     print("  Step 2: build CAN Upload from missing-CAN decision rows.")
     can_upload_df = build_can_upload(decisions)
-    print("  Step 3: build output tabs in this order: Final Assignment, upload, job request, can upload, can output, amend review, provisional match, Output, Sheet8, Summary.")
+    print("  Step 3: auto-match unassigned shifts to open Sourcing jobs (build Upload tab).")
+    upload_df, upload_matched_idx = build_upload(decisions, tabs.get("job status"))
+    print("  Step 4: build remaining output tabs (Final Assignment, job request, can upload, can output, amend review, provisional match, Output, Sheet8, Summary).")
     output_tabs = {
-        "Final Assignment": build_final_assignment_tab(decisions),
-        "upload": build_upload(decisions),
-        "job request": build_job_request(decisions, tabs["Open Active"]),
+        "Final Assignment": build_final_assignment_tab(decisions, upload_matched_idx),
+        "upload": upload_df,
+        "job request": build_job_request(decisions, tabs["Open Active"], upload_matched_idx),
         "can upload": can_upload_df,
         "can output": build_can_output(can_upload_df),
         "amend review": build_amend_tab(decisions, tabs["Open & Closed"]),
@@ -1247,9 +1396,9 @@ def build_assignment_tabs(tabs: dict[str, pd.DataFrame]) -> tuple[dict[str, pd.D
 
 def print_assignment_distribution(decisions: pd.DataFrame, output_tabs: dict[str, pd.DataFrame]) -> None:
     """Print the assignment workload breakdown for the current run."""
-    zeros = (decisions["Perfect AID"].astype(str) == "0") & (decisions["2nd Best AID"].astype(str) == "0")
     can_upload_df = output_tabs["can upload"]
     job_request_df = output_tabs["job request"]
+    upload_df = output_tabs["upload"]
     print("Assignment-logic distribution:")
     print(f"  Mode rows total:                 {len(decisions)}")
     print(f"  Perfect AID matched (do nothing): {(decisions['Perfect AID'].astype(str) != '0').sum()}")
@@ -1257,9 +1406,9 @@ def print_assignment_distribution(decisions: pd.DataFrame, output_tabs: dict[str
         "  2nd Best AID matched (amend):     "
         f"{((decisions['Perfect AID'].astype(str) == '0') & (decisions['2nd Best AID'].astype(str) != '0')).sum()}"
     )
+    print(f"  Auto-matched to Sourcing (upload): {len(upload_df)}")
     print(f"  Need new CAN ID (can upload):     {len(can_upload_df)}")
     print(f"  Need new job posting (job req):   {len(job_request_df)}")
-    print(f"  Ready for Upload (needs AC):      {zeros.sum() - len(can_upload_df) - len(job_request_df)}")
 
 
 def run_assignment_logic(
