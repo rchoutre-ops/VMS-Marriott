@@ -714,25 +714,28 @@ def highlight_review_tabs(args: Any, output_tabs: dict[str, pd.DataFrame]) -> No
     review_tabs = [t for t in ("Final Assignment", "job request", "can upload", "amend review", "provisional match") if t in output_tabs]
     if not review_tabs:
         return
-    credentials = Credentials.from_service_account_file(
-        str(args.google_credentials),
-        scopes=["https://www.googleapis.com/auth/spreadsheets"],
-    )
-    service = build("sheets", "v4", credentials=credentials, cache_discovery=False)
-    spreadsheet = (
-        service.spreadsheets()
-        .get(spreadsheetId=args.target_spreadsheet_id, fields="sheets(properties(sheetId,title))")
-        .execute()
-    )
-    sheet_id_by_title = {s["properties"]["title"]: s["properties"]["sheetId"] for s in spreadsheet.get("sheets", [])}
-    print("Applying review-row highlighting:")
-    for tab_name in review_tabs:
-        df = output_tabs[tab_name]
-        if tab_name not in sheet_id_by_title:
-            print(f"  Tab '{tab_name}' not found in spreadsheet — skipping highlight.")
-            continue
-        review_col = "Should Review" if tab_name == "Final Assignment" else "Should be reviewed"
-        _highlight_review_rows(service, args.target_spreadsheet_id, sheet_id_by_title[tab_name], df, review_col)
+    try:
+        credentials = Credentials.from_service_account_file(
+            str(args.google_credentials),
+            scopes=["https://www.googleapis.com/auth/spreadsheets"],
+        )
+        service = build("sheets", "v4", credentials=credentials, cache_discovery=False)
+        spreadsheet = (
+            service.spreadsheets()
+            .get(spreadsheetId=args.target_spreadsheet_id, fields="sheets(properties(sheetId,title))")
+            .execute()
+        )
+        sheet_id_by_title = {s["properties"]["title"]: s["properties"]["sheetId"] for s in spreadsheet.get("sheets", [])}
+        print("Applying review-row highlighting:")
+        for tab_name in review_tabs:
+            df = output_tabs[tab_name]
+            if tab_name not in sheet_id_by_title:
+                print(f"  Tab '{tab_name}' not found in spreadsheet — skipping highlight.")
+                continue
+            review_col = "Should Review" if tab_name == "Final Assignment" else "Should be reviewed"
+            _highlight_review_rows(service, args.target_spreadsheet_id, sheet_id_by_title[tab_name], df, review_col)
+    except Exception as exc:  # noqa: BLE001
+        print(f"  Review-row highlighting failed (non-fatal): {exc}")
 
 
 # ── Provisional-match tab ────────────────────────────────────────────────────
