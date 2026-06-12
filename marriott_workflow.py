@@ -1022,10 +1022,13 @@ def upload_tabs(args: argparse.Namespace, tabs: dict[str, pd.DataFrame]) -> None
                 }
             )
     if rename_requests:
-        service.spreadsheets().batchUpdate(
-            spreadsheetId=args.target_spreadsheet_id,
-            body={"requests": rename_requests},
-        ).execute()
+        execute_google_request(
+            service.spreadsheets().batchUpdate(
+                spreadsheetId=args.target_spreadsheet_id,
+                body={"requests": rename_requests},
+            ),
+            "rename existing tabs",
+        )
         for old_name, new_name in TAB_RENAME_MAP.items():
             if old_name in existing and new_name not in existing:
                 props = existing.pop(old_name)
@@ -1062,30 +1065,36 @@ def upload_tabs(args: argparse.Namespace, tabs: dict[str, pd.DataFrame]) -> None
             existing[title] = response["replies"][0]["addSheet"]["properties"]
         else:
             sheet_id = existing[title]["sheetId"]
-            service.spreadsheets().batchUpdate(
-                spreadsheetId=args.target_spreadsheet_id,
-                body={
-                    "requests": [
-                        {
-                            "updateSheetProperties": {
-                                "properties": {
-                                    "sheetId": sheet_id,
-                                    "gridProperties": {
-                                        "rowCount": row_count,
-                                        "columnCount": col_count,
+            execute_google_request(
+                service.spreadsheets().batchUpdate(
+                    spreadsheetId=args.target_spreadsheet_id,
+                    body={
+                        "requests": [
+                            {
+                                "updateSheetProperties": {
+                                    "properties": {
+                                        "sheetId": sheet_id,
+                                        "gridProperties": {
+                                            "rowCount": row_count,
+                                            "columnCount": col_count,
+                                        },
                                     },
-                                },
-                                "fields": "gridProperties(rowCount,columnCount)",
+                                    "fields": "gridProperties(rowCount,columnCount)",
+                                }
                             }
-                        }
-                    ]
-                },
-            ).execute()
+                        ]
+                    },
+                ),
+                f"resize sheet {title}",
+            )
 
-        service.spreadsheets().values().clear(
-            spreadsheetId=args.target_spreadsheet_id,
-            range=f"'{title}'",
-        ).execute()
+        execute_google_request(
+            service.spreadsheets().values().clear(
+                spreadsheetId=args.target_spreadsheet_id,
+                range=f"'{title}'",
+            ),
+            f"clear sheet {title}",
+        )
 
         values = df_to_values(df)
         end_col = column_name(len(values[0]) - 1)
@@ -1096,14 +1105,18 @@ def upload_tabs(args: argparse.Namespace, tabs: dict[str, pd.DataFrame]) -> None
             start_row = start + 1
             end_row = start + len(chunk)
             update_range = f"'{title}'!A{start_row}:{end_col}{end_row}"
-            service.spreadsheets().values().update(
-                spreadsheetId=args.target_spreadsheet_id,
-                range=update_range,
-                valueInputOption="USER_ENTERED",
-                body={"values": chunk},
-            ).execute()
+            execute_google_request(
+                service.spreadsheets().values().update(
+                    spreadsheetId=args.target_spreadsheet_id,
+                    range=update_range,
+                    valueInputOption="USER_ENTERED",
+                    body={"values": chunk},
+                ),
+                f"write rows to {title}",
+            )
 
         print(f"Updated {title}: {len(df)} rows x {len(df.columns)} columns")
+        time.sleep(1.1)
 
 
 def _row_key(row: list[Any], width: int, headers: list[str] | None = None) -> tuple[str, ...]:
